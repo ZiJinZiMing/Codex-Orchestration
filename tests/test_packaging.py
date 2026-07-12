@@ -24,7 +24,8 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.4.0")
+        self.assertEqual(manifest["version"], "0.5.0")
+        self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
             r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$",
@@ -44,6 +45,23 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
+    def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
+        mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        servers = mcp["mcpServers"]
+        self.assertEqual(
+            set(servers),
+            {
+                "fable-advisor-python3",
+                "fable-advisor-python",
+                "fable-advisor-py",
+            },
+        )
+        for server in servers.values():
+            self.assertFalse(server["enabled"])
+            self.assertEqual(server["cwd"], ".")
+            self.assertIn("fable_advisor_mcp.py", server["args"][-1])
+        self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
+
     def test_explicit_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -52,10 +70,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("allow_implicit_invocation: false", metadata)
         self.assertIn("/codex-orchestration setup executor:", readme)
         self.assertIn("GPT-5.6 Luna Extra High", readme)
-        self.assertIn("$codex-orchestration:codex-orchestration", readme)
+        self.assertIn("/codex-orchestration create these project roles:", readme)
         self.assertIn("/codex-orchestration status", readme)
         self.assertIn("/codex-orchestration disable", readme)
-        self.assertIn("advisor: none", readme)
         self.assertIn("codex plugin add codex-orchestration@codex-orchestration", readme)
 
     def test_starter_prompts_fit_codex_limits(self) -> None:
@@ -89,7 +106,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.3.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.4.0"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.5.0"', smoke_text)
         self.assertIn("configure_native_routing.py", smoke_text)
         self.assertIn("configure_orchestration.py", smoke_text)
         self.assertIn('"marketplace",\n                    "upgrade"', smoke_text)
@@ -100,36 +117,43 @@ class PackagingTests(unittest.TestCase):
 
         self.assertIn("already the orchestrator", skill)
         self.assertIn("The current task model remains the root", skill)
-        self.assertIn("model you select when you start a Codex task is already", readme)
-        self.assertIn("SOL IS THE ORCHESTRATOR", readme)
+        self.assertIn("model selected for the task stays in charge", readme)
+        self.assertIn("SOL — ROOT ORCHESTRATOR", readme)
+        self.assertIn("Codex remains the root orchestrator", readme)
         self.assertNotIn("--orchestrator-model", skill + readme)
 
-    def test_readme_explains_config_only_route_without_overpromising(self) -> None:
+    def test_readme_explains_policy_guided_route_without_overpromising(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         native = (SKILL_ROOT / "scripts" / "configure_native_routing.py").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn("Is config alone enough?", readme)
-        self.assertIn("Neither says “use Luna.”", readme)
-        self.assertIn("no global `executor_model = ...`", readme)
-        self.assertIn("Same-provider config routing is strong tool-level guidance", readme)
-        self.assertIn('sets `tool_namespace = "agents"`', readme)
-        self.assertIn("reserved `collaboration.spawn_agent` schema", readme)
-        self.assertIn("does **not** force `enabled = true`", readme)
+        self.assertIn("Other providers must already be configured and authenticated", readme)
+        self.assertIn("never creates credentials or bypasses permissions", readme)
+        self.assertIn("Codex decides when delegation or parallel work is useful", readme)
+        self.assertIn("Fable 5 is a root-facing plan advisor, not a second orchestrator", readme)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', native)
 
     def test_ascii_and_role_copy_are_plain_and_root_centered(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("SOL IS THE ORCHESTRATOR", readme)
-        self.assertIn("ADVISOR checks the plan", readme)
-        self.assertIn("LUNA / TERRA executor(s)", readme)
-        self.assertIn("SOL REVIEWS AND INTEGRATES", readme)
-        self.assertIn("Advisor: the second opinion", readme)
-        self.assertIn("Executor: the builder", readme)
-        self.assertNotIn("Native Codex", readme)
-        self.assertNotIn("CURRENT SESSION MODEL", readme)
+        self.assertIn("SOL — ROOT ORCHESTRATOR", readme)
+        self.assertIn("FABLE 5 — PLAN ADVISOR", readme)
+        self.assertIn("LUNA EXECUTOR 1", readme)
+        self.assertIn("LUNA EXECUTOR 2", readme)
+        self.assertIn("tests and delivers", readme)
+        self.assertNotIn("SOL IS THE ORCHESTRATOR", readme)
+
+    def test_readme_leads_with_the_product_before_installation(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        what = readme.index("## What does it do?")
+        diagram = readme.index("## How it works")
+        value = readme.index("## Why use it?")
+        install = readme.index("## Install")
+        self.assertLess(what, diagram)
+        self.assertLess(diagram, value)
+        self.assertLess(value, install)
 
     def test_advisor_protocol_is_bounded_and_root_only(self) -> None:
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -143,33 +167,36 @@ class PackagingTests(unittest.TestCase):
     def test_cross_provider_copy_names_the_real_protocol_boundary(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("config-file/config-advanced#custom-model-providers", readme)
-        self.assertIn("Responses wire protocol", readme)
-        self.assertIn("Anthropic Messages", readme)
-        self.assertIn("Amazon Bedrock", readme)
-        self.assertIn("configured and tested", readme)
-        self.assertIn("<personal-id>.toml", readme)
-        self.assertIn("same-name project collision", readme)
+        self.assertIn("Other models must already be available through Codex", readme)
+        self.assertIn("an authenticated, compatible provider", readme)
+        self.assertIn("do not need to add an Anthropic API key to Codex", readme)
+        self.assertIn("`.codex/agents/`", readme)
+        self.assertIn("`~/.codex/agents/`", readme)
 
-    def test_savings_copy_distinguishes_credits_from_raw_tokens(self) -> None:
+    def test_speed_and_limit_copy_is_clear_and_qualified(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("illustrative reduction", readme)
-        self.assertIn("64%", readme)
-        self.assertIn("cannot promise 65% fewer raw tokens", readme)
-        self.assertIn("model-weighted Codex credits", readme)
-        self.assertIn("Multi-agent work can use more raw tokens", readme)
-        self.assertIn("shared five-hour", readme)
-        self.assertIn("weekly allowances", readme)
+        self.assertIn("up to 2x faster on suitable tasks", readme)
+        self.assertIn("limits about 40% less often", readme)
+        self.assertIn("speed and limit figures are targets, not guarantees", readme)
+
+    def test_fable_is_the_primary_quick_start(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Quick start with Fable 5", readme)
+        self.assertIn(
+            "advisor: Claude Fable 5 High",
+            readme,
+        )
+        self.assertNotIn("advisor: GPT-5.6 Terra", readme)
 
     def test_update_and_uninstall_remove_managed_state_explicitly(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("/codex-orchestration status", readme)
-        self.assertIn("First disable the persistent policy", readme)
-        self.assertIn("restores the values that existed before setup", readme)
-        self.assertIn("does not silently delete a policy", readme)
-        self.assertIn("versions 0.1–0.3", readme)
+        self.assertIn("`disable` restores the Codex routing values", readme)
+        self.assertIn("does not delete user-owned custom roles", readme)
+        self.assertIn("Review and remove any user-owned custom roles separately", readme)
 
 
 if __name__ == "__main__":

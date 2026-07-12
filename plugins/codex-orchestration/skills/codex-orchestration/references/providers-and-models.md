@@ -6,7 +6,7 @@ Use this reference for setup, client compatibility, custom providers, or a route
 
 1. The model selected for the Codex task is the root orchestrator.
 2. A current Sol or Terra root uses multi-agent v2.
-3. The saved policy supplies the exact route for every delegated executor and optional advisor.
+3. The saved policy tells the root which exact route to request for every delegated executor and optional advisor.
 4. Codex still decides whether a spawn helps.
 5. Every different-model, different-effort, or custom-agent child uses `fork_turns = "none"` and a self-contained packet.
 6. The root reviews and verifies all child work.
@@ -26,8 +26,9 @@ These facts were source-checked and runtime-tested on July 10, 2026. Always capa
 | `tool_namespace = "agents"` | On live-tested Desktop `0.144.0-alpha.4`, the default `collaboration` namespace rejected expanded model/effort metadata; `agents` accepted it and spawned Luna at `xhigh`. | Required for this validated direct-routing path. It changes the callable namespace but does not select Luna. |
 | `usage_hint_text` | Appended to the spawn tool description | Carries the exact executor/advisor route where the root chooses children. |
 | `multi_agent_mode_hint_text` | Replaces the default proactive/explicit mode hint and is sent to root and child tasks | Must contain both root and child boundaries. |
+| Claude Fable 5 MCP route | Root-only `review_plan` tool invokes the authenticated Claude Code CLI headlessly | Built-in cross-provider advisor exception; no custom Codex provider or advisor child. |
 | `fork_turns` default | `all` | Different model/effort/role overrides are rejected unless the call uses `none` or a positive partial fork. |
-| v2 default concurrency | Four active threads including the root | Normally at most three children run concurrently. Codex chooses the useful count. |
+| Effective concurrency | Determined by the active Codex version and `agents.max_threads` configuration | This plugin never changes the limit or forces a worker count. |
 | Older CLI 0.142.5 | Rejects `multi_agent_mode_hint_text` as an unknown feature-table field | Never write the global native policy without checking every known shared-config client. |
 
 The installer does not infer this from version strings. It launches each detected binary with an isolated `CODEX_HOME` and probes whether it can parse all four managed fields. That is a config-compatibility check, not proof of a live child route.
@@ -77,6 +78,8 @@ agent_type="codex_orchestration_executor", fork_turns="none"
 agent_type="codex_orchestration_advisor", fork_turns="none"
 ```
 
+For Claude Fable 5 it names the enabled bundled MCP server and tells the root to call its `review_plan` tool. This is a root tool call, not `spawn_agent`, so `fork_turns` does not apply.
+
 The custom mode text is visible in spawned children too. That is why it says: if root, orchestrate; if child, stay within the packet and never spawn.
 
 ## Routing strength and its honest boundary
@@ -90,6 +93,8 @@ There is no global Codex field named `executor_model`. The native same-provider 
 - optional effective-runtime confirmation when the client exposes it.
 
 That is strong routing, but it is not a separate engine-level scheduler. The root can still choose not to delegate. Tool acceptance proves Codex accepted and validated the requested route; it does not guarantee that every client exposes the effective post-start identity. If the model ignores the required route or the tool rejects it, report that mismatch rather than claiming success.
+
+Setup runs before a future task chooses its root, so it cannot persist a mechanically verified future root-provider identity. Direct routes are valid only when the active task can establish that the requested model belongs to the inherited root provider. If provider identity is missing or ambiguous, fail closed and use a provider-pinned custom agent.
 
 A custom-agent file is the stronger persistent pin for a reusable role because the role config can set `model`, `model_reasoning_effort`, and `model_provider`. A stronger live parent override can still win, so confirm the effective child metadata either way.
 
@@ -146,7 +151,7 @@ Restore state lives at:
 ~/.codex/.codex-orchestration-routing.json
 ```
 
-It contains the prior and managed values of the four owned fields, chosen seat IDs, schema/version markers, scalar-conversion metadata when needed, and config path. It never copies provider definitions, auth stores, or config outside those fields. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
+It contains the prior and managed values of the four routing fields, chosen seat IDs, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
 
 Disable compares every current managed value before restoration. If the user edited a managed field after setup, it stops instead of erasing that work. Without state, each surviving marker proves ownership only of that hint string. Disable may safely remove the marked string or strings, but it leaves metadata visibility and the tool namespace unchanged because their previous values are unknown.
 
@@ -200,9 +205,17 @@ Treat a saved scope as one complete team anchored by its executor. A missing sam
 
 The standalone-agent configurator remains dry-run first, rejects symlinks and hard links, preserves supported metadata, journals multi-file transactions without storing config contents, refuses edited or user-owned files, and uses opt-in backup-first migration for known output from versions 0.1–0.3.
 
+The role-file transaction and native App Server policy transaction are independent. After a phase-two failure, remove only fully validated newly managed roles. Native status reports collision-resistant managed personal roles that are not referenced by its current restore state, and `--require-effective` treats them as unhealthy. This recovery is compensating cleanup, not atomicity across the two stores.
+
+On Windows, the custom-agent configurator can create a new role but refuses in-place update or removal of an existing managed role because it cannot prove the Unix inode/metadata-preservation contract. Native App Server policy setup and disable are separate and remain capability-tested through the active Codex binary.
+
 ## Provider boundaries
 
 Direct v2 `model` overrides retain the parent's provider. They are the simplest route for an OpenAI root and OpenAI Luna/Terra child.
+
+Claude Fable 5 is the explicit built-in exception. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
+
+The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vertex/Foundry selection variables from the child environment. It re-checks `claude auth status`, pins `claude-fable-5` and the saved effort, disables tools and session persistence, disables prompt suggestions, and requires JSON runtime metadata to confirm the model. Setup and status never make a model call.
 
 A cross-provider seat normally needs:
 
@@ -221,6 +234,8 @@ A task-local advisor is review-only by instruction. Do not claim it is mechanica
 
 A saved advisor requests `sandbox_mode = "read-only"`, but live parent permission overrides may be reapplied to children. Keep the behavioral prohibition on edits and mutation even with the requested sandbox.
 
+The Claude Fable 5 advisor is mechanically narrower than a child: the MCP tool accepts only a review packet, launches Claude with safe mode and no tools, and exposes no edit or shell operation. It still has open-world model access, so the packet must be deliberate and self-contained.
+
 Advisor failure is never approval. A configured advisor is required for a non-trivial executor plan unless the user explicitly marks it best-effort. Transport failure, malformed output, missing context, or wrong route becomes `advisor unavailable`; stop before executor work by default, or disclose and continue under the root only in best-effort mode.
 
 ## Goals and task lifetime
@@ -235,7 +250,7 @@ Named profile-v2 files are separate selected user layers. The default command do
 
 ## Concurrency and service tier
 
-V2 defaults to four total active threads, including the root. That means up to three concurrent children by default. Root plus five children would require six total, but this plugin never changes the limit or forces five children. Codex should parallelize only independent slices with non-overlapping write ownership.
+The effective concurrency limit belongs to the active Codex version and `agents.max_threads` configuration. This plugin never changes that limit or forces a worker count. Codex should parallelize only independent slices with non-overlapping write ownership.
 
 Child service tier can inherit from the parent when supported. There is no portable “force standard tier” spawn setting that works across current catalogs. If allowance savings are the priority, do not enable Fast/priority on the root.
 
@@ -244,6 +259,7 @@ Child service tier can inherit from the parent when supported. There is no porta
 Use precise language:
 
 - `native policy installed`: managed user policy exists; activation still depends on root model and effective workspace config;
+- `policy effective`: the managed fields win in the current workspace; this is still not a live spawn;
 - `pinned custom agent available`: matching role loaded, not yet used;
 - `route accepted`: exact controls were accepted and validated by the current tool;
 - `unverified prompt preference`: no exact control available;

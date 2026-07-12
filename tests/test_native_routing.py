@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -75,7 +76,24 @@ def version():
     return int(version_file.read_text()) if version_file.exists() else 0
 
 def set_path(root, path, value):
-    parts = path.split(".")
+    parts = []
+    current_part = []
+    quoted = False
+    escaped = False
+    for character in path:
+        if escaped:
+            current_part.append(character)
+            escaped = False
+        elif character == "\\" and quoted:
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == "." and not quoted:
+            parts.append("".join(current_part))
+            current_part = []
+        else:
+            current_part.append(character)
+    parts.append("".join(current_part))
     current = root
     for part in parts[:-1]:
         if not isinstance(current.get(part), dict):
@@ -227,6 +245,32 @@ class NativeRoutingTests(unittest.TestCase):
         self.codex = self.root / "fake-codex"
         self.codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
         self.codex.chmod(0o755)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.claude = self.bin / "claude"
+        self.claude.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import sys
+                if sys.argv[1:] == ["auth", "status"]:
+                    print(json.dumps({
+                        "loggedIn": True,
+                        "authMethod": "claude.ai",
+                        "apiProvider": "firstParty",
+                        "subscriptionType": "max",
+                    }))
+                    raise SystemExit(0)
+                if sys.argv[1:] == ["--help"]:
+                    print("--model --effort --safe-mode --prompt-suggestions")
+                    raise SystemExit(0)
+                raise SystemExit(2)
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.claude.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -238,6 +282,8 @@ class NativeRoutingTests(unittest.TestCase):
         allow_incompatible: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         compatibility = ["--allow-incompatible-client"] if allow_incompatible else []
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         result = subprocess.run(
             [
                 sys.executable,
@@ -254,6 +300,7 @@ class NativeRoutingTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             timeout=20,
             check=False,
+            env=env,
         )
         if check and result.returncode != 0:
             self.fail(f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
@@ -352,6 +399,10 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Executor: gpt-5.6-luna@xhigh", status.stdout)
         self.assertIn("Advisor: none", status.stdout)
         self.assertIn("V2 tool namespace: agents", status.stdout)
+        self.assertIn("Routing validation: not performed", status.stdout)
+
+        required = self.run_script("--status", "--require-effective")
+        self.assertEqual(required.returncode, 0)
 
         disabled = self.run_script("--disable", "--apply")
         self.assertIn("Native routing disabled", disabled.stdout)
@@ -502,6 +553,10 @@ class NativeRoutingTests(unittest.TestCase):
         status = self.run_script("--status")
         self.assertIn("managed fields conflict", status.stdout)
         self.assertIn("Seats: suppressed", status.stdout)
+        required = self.run_script(
+            "--status", "--require-effective", check=False
+        )
+        self.assertEqual(required.returncode, 1)
         update = self.run_script(
             "--executor-model",
             "gpt-5.6-terra",
@@ -574,6 +629,69 @@ class NativeRoutingTests(unittest.TestCase):
             allow_incompatible=False,
         )
         self.assertIn("Native routing disabled", disabled.stdout)
+
+    def test_require_effective_rejects_inactive_and_incompatible_status(self) -> None:
+        inactive = self.run_script(
+            "--status", "--require-effective", check=False
+        )
+        self.assertEqual(inactive.returncode, 1)
+        self.assertIn("Native policy: inactive", inactive.stdout)
+
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        old_codex = self.root / "old-status-codex"
+        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
+        old_codex.chmod(0o755)
+        incompatible = self.run_script(
+            "--status",
+            "--require-effective",
+            "--compat-bin",
+            str(old_codex),
+            check=False,
+        )
+        self.assertEqual(incompatible.returncode, 1)
+        self.assertIn("incompatible", incompatible.stdout)
+
+    def test_require_effective_rejects_orphaned_managed_personal_role(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        agents = self.home / "agents"
+        agents.mkdir()
+        orphan_name = "codex_orchestration_executor_012345abcdef"
+        (agents / "orphan.toml").write_text(
+            "\n".join(
+                (
+                    NATIVE.CUSTOM_AGENT_MANAGED_MARKER,
+                    f'name = "{orphan_name}"',
+                    'description = "Managed orphan"',
+                    'model = "gpt-5.6-luna"',
+                    'developer_instructions = "Stay bounded."',
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        status = self.run_script(
+            "--status", "--require-effective", check=False
+        )
+        self.assertEqual(status.returncode, 1)
+        self.assertIn("Orphaned managed custom agents", status.stdout)
+        self.assertIn(orphan_name, status.stdout)
+
+    def test_require_effective_requires_status(self) -> None:
+        result = self.run_script("--require-effective", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires --status", result.stderr)
 
     def test_state_from_another_config_is_refused(self) -> None:
         self.run_script(
@@ -684,6 +802,55 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(state["executor"]["model"], "gpt-5.6-luna")
 
+    def test_effective_readback_rejects_unexpected_rollback_status(self) -> None:
+        effective = {
+            "features": {
+                "multi_agent_v2": {
+                    "hide_spawn_agent_metadata": True,
+                    "tool_namespace": "collaboration",
+                }
+            }
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(effective), encoding="utf-8"
+        )
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            return {"status": "unexpected", "version": "sha256:unknown"}
+
+        argv = [
+            str(SCRIPT),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("automatic rollback failed", stderr.getvalue())
+        self.assertIn("unexpected rollback status", stderr.getvalue())
+        self.assertTrue((self.home / NATIVE.STATE_FILENAME).exists())
+
     def test_ok_overridden_restores_every_owned_field(self) -> None:
         initial = {
             "features": {
@@ -726,6 +893,50 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
+    def test_state_failure_rejects_unexpected_rollback_status(self) -> None:
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            return {"status": "unexpected", "version": "sha256:unknown"}
+
+        argv = [
+            str(SCRIPT),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE,
+                "_write_state",
+                side_effect=NATIVE.ConfigurationError("forced state failure"),
+            ),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("may still contain managed fields", stderr.getvalue())
+        self.assertIn("unexpected rollback status", stderr.getvalue())
+        feature = self.read_fake_config()["features"]["multi_agent_v2"]
+        self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
+
     def test_custom_agent_route_and_optional_advisor(self) -> None:
         self.write_personal_agent("codex_orchestration_executor")
         self.write_personal_agent("codex_orchestration_advisor")
@@ -741,6 +952,65 @@ class NativeRoutingTests(unittest.TestCase):
         usage = feature["usage_hint_text"]
         self.assertIn('agent_type = "codex_orchestration_executor"', usage)
         self.assertIn('agent_type = "codex_orchestration_advisor"', usage)
+
+    def test_fable_setup_status_update_and_disable_restore_mcp_policy(self) -> None:
+        initial = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "plugins": {
+                NATIVE.PLUGIN_ID: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False},
+                        "fable-advisor-python": {"enabled": True},
+                    }
+                }
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "max",
+            "--apply",
+        )
+        self.assertIn("Claude Fable 5 Extra High", setup.stdout)
+        config = self.read_fake_config()
+        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        self.assertTrue(servers["fable-advisor-python3"]["enabled"])
+        self.assertFalse(servers["fable-advisor-python"]["enabled"])
+        self.assertNotIn("fable-advisor-py", servers)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["advisor"]["kind"], "fable")
+        self.assertEqual(state["advisor"]["model"], "claude-fable-5")
+        self.assertIn("mcp", state["previous"])
+
+        status = self.run_script("--status")
+        self.assertIn("Claude Fable 5: ready", status.stdout)
+        self.assertIn("no model call made", status.stdout)
+
+        update = self.run_script(
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        self.assertIn("Advisor: none", update.stdout)
+        servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        self.assertTrue(all(not entry["enabled"] for entry in servers.values()))
+
+        self.run_script("--disable", "--apply")
+        self.assertEqual(self.read_fake_config(), initial)
 
     def test_missing_or_project_shadowed_custom_agent_is_refused(self) -> None:
         missing = self.run_script(

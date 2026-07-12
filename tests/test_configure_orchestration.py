@@ -2082,7 +2082,9 @@ multi_agent = true'''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / "agent.toml"
-            path.write_text("old\n", encoding="utf-8")
+            # Keep the fixture byte-exact on Windows; the production reader uses
+            # newline="" so CRLF translation must not mask the intended branch.
+            path.write_bytes(b"old\n")
 
             with (
                 mock.patch.object(CONFIGURE.os, "name", "nt"),
