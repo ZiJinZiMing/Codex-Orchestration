@@ -196,6 +196,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertEqual(schema, FABLE.REVIEW_SCHEMA)
         self.assertEqual(review_kwargs["input"], "Review this complete plan.")
+        self.assertEqual(calls[0][1]["encoding"], "utf-8")
+        self.assertEqual(review_kwargs["encoding"], "utf-8")
         sanitized = review_kwargs["env"]
         self.assertIsInstance(sanitized, dict)
         for name in FABLE.SENSITIVE_ENV:

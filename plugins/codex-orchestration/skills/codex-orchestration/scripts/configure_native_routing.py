@@ -875,6 +875,7 @@ def verify_fable_prerequisites(
                 }
             },
             text=True,
+            encoding="utf-8",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=PROBE_TIMEOUT_SECONDS,

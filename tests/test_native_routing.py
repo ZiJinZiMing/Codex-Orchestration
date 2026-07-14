@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 from unittest import mock
 
@@ -367,6 +368,31 @@ class NativeRoutingTests(unittest.TestCase):
             any("multi_agent_mode_hint_text" in value for value in argv)
         )
         self.assertTrue(any("usage_hint_text" in value for value in argv))
+
+    def test_fable_help_probe_decodes_utf8(self) -> None:
+        fake_module = types.ModuleType("fable_advisor_mcp")
+        fake_module.AdvisorError = RuntimeError
+        fake_module.resolve_claude = lambda: self.claude
+        fake_module.check_claude_auth = lambda *_: {
+            "auth_method": "gateway",
+            "api_provider": "OpenRouter",
+        }
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=(
+                "--model --effort --safe-mode --prompt-suggestions "
+                "--setting-sources --json-schema"
+            ),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"fable_advisor_mcp": fake_module}),
+            mock.patch.object(NATIVE.subprocess, "run", return_value=completed) as run,
+        ):
+            result = NATIVE.verify_fable_prerequisites(NATIVE.CC_SWITCH_PROFILE)
+
+        self.assertEqual(result["auth_method"], "gateway")
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
 
     def test_setup_status_and_disable_round_trip(self) -> None:
         preview = self.run_script(
