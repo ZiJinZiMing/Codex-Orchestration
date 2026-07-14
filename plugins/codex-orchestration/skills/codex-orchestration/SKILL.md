@@ -101,7 +101,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --apply
 ```
 
-Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable --advisor-effort max`. The configurator requires Claude Code to be logged in through a first-party Pro or Max account, chooses an available Python 3.11+ MCP launcher, and performs only an auth/capability check during setup. It never extracts a token, writes a credential, or makes a model call during setup or status. Omission persists `advisor: none`.
+Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable --advisor-effort max`. The default transport requires a first-party Pro or Max Claude Code login. When the user explicitly names the existing CC Switch/OpenRouter route, add `--advisor-fable-transport cc-switch-openrouter-loopback`; that profile requires the fixed `127.0.0.1:15721` loopback, the current CC Switch Claude provider to be OpenRouter, and its Fable mapping to resolve to `anthropic/claude-fable-5`. The configurator chooses an available Python 3.11+ MCP launcher and performs only auth, capability, loopback, and route checks during setup. It never copies or writes a token and never makes a model call during setup or status. Omission persists `advisor: none`.
 
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
@@ -158,17 +158,17 @@ For personal v0.4 custom roles, preview and apply removal with `configure_orches
 
 Use this built-in route when the user names Claude Fable 5. Do not create a custom provider or custom-agent file for it.
 
-In every user-facing status or result, use the exact name `Claude Fable 5`. Report authentication as `first-party login ready`; do not expose or restate Claude account-plan metadata.
+In every user-facing status or result, use the exact name `Claude Fable 5`. Report the selected transport as `first-party login ready` or `CC Switch/OpenRouter preflight ready`; do not expose or restate Claude account-plan metadata, tokens, raw request IDs, or proxy payloads.
 
 Prerequisites:
 
 - the official `claude` CLI is installed;
-- `claude auth status` reports a first-party Pro or Max login;
+- either `claude auth status` reports a first-party Pro or Max login, or the explicitly selected CC Switch/OpenRouter loopback profile passes all route checks;
 - a Python 3.11+ launcher is available.
 
-The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly the compatible variant through the plugin's namespaced config. At review time the MCP server removes API-key and Bedrock/Vertex/Foundry override variables, re-checks first-party login, and invokes `claude -p --model claude-fable-5` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. The saved route pins the model and effort; the root cannot replace them through tool arguments.
+The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly the compatible variant through the plugin's namespaced config. At review time the MCP server removes inherited API-key, endpoint, and Bedrock/Vertex/Foundry override variables and invokes `claude -p --model claude-fable-5` with user settings only, `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. The saved route pins the model, effort, and transport; the root cannot replace them through tool arguments.
 
-The bridge accepts only one self-contained `packet`. It requires `PLAN_APPROVED` or `PLAN_REVISE` as the first non-empty line and requires runtime `modelUsage` to confirm `claude-fable-5`. Any auth, transport, format, or model-confirmation failure is `advisor unavailable`, never approval. It returns no account identifier or credential.
+The bridge accepts only one self-contained `packet`. It uses Claude Code's `--json-schema` output contract to require a `PLAN_APPROVED` or `PLAN_REVISE` decision plus non-empty review text, and requires runtime `modelUsage` to confirm `claude-fable-5`. The CC Switch/OpenRouter profile additionally generates a unique Claude Code session ID, records the SQLite `rowid` cursor before the call, and requires exactly one fresh successful Fable request with that session ID through the OpenRouter provider whose requested and response models identify Claude Fable 5. Non-Fable helper requests made by Claude Code under the same session do not count as advisor evidence. Any auth, transport, route-evidence, format, or model-confirmation failure is `advisor unavailable`, never approval. It returns no account identifier, credential, session ID, raw request ID, prompt, response body, or proxy error body.
 
 ## Durable or cross-provider custom agents
 

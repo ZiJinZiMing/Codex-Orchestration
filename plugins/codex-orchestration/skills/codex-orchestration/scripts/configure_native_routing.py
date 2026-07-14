@@ -31,8 +31,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
 
 
 POLICY_VERSION = 2
-STATE_SCHEMA = 2
-SUPPORTED_STATE_SCHEMAS = {1, 2}
+STATE_SCHEMA = 3
+SUPPORTED_STATE_SCHEMAS = {1, 2, 3}
 MANAGED_MARKER = "[codex-orchestration managed-policy v1]"
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
@@ -40,6 +40,9 @@ ROUTING_TOOL_NAMESPACE = "agents"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
 FABLE_MODEL = "claude-fable-5"
 FABLE_EFFORTS = {"low", "medium", "high", "max"}
+FIRST_PARTY_PROFILE = "first-party"
+CC_SWITCH_PROFILE = "cc-switch-openrouter-loopback"
+FABLE_TRANSPORT_PROFILES = {FIRST_PARTY_PROFILE, CC_SWITCH_PROFILE}
 FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
     "fable-advisor-python": ("python", []),
@@ -106,6 +109,15 @@ def parse_args() -> argparse.Namespace:
         "--advisor-effort",
         default="auto",
         help="Exact supported advisor effort, or auto.",
+    )
+    parser.add_argument(
+        "--advisor-fable-transport",
+        choices=sorted(FABLE_TRANSPORT_PROFILES),
+        default=FIRST_PARTY_PROFILE,
+        help=(
+            "Claude Fable 5 transport. The default preserves the first-party "
+            "subscription route."
+        ),
     )
 
     parser.add_argument("--codex-bin", default="codex")
@@ -184,6 +196,10 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ConfigurationError(
                 "Claude Fable 5 effort must be one of: low, medium, high, max."
             )
+    elif args.advisor_fable_transport != FIRST_PARTY_PROFILE:
+        raise ConfigurationError(
+            "--advisor-fable-transport requires --advisor-fable."
+        )
     for label, value, pattern in (
         ("executor model", args.executor_model, MODEL_RE),
         ("advisor model", args.advisor_model, MODEL_RE),
@@ -567,13 +583,20 @@ def _read_state(path: Path) -> dict[str, Any] | None:
             kind == "agent"
             and isinstance(route.get("agent"), str)
             and AGENT_RE.fullmatch(route["agent"])
-        ) or (
-            label == "advisor"
-            and kind == "fable"
-            and route.get("model") == FABLE_MODEL
-            and route.get("effort") in FABLE_EFFORTS
-            and route.get("server") in FABLE_SERVERS
         )
+        if label == "advisor" and kind == "fable":
+            try:
+                _fable_transport_profile(route)
+            except ConfigurationError:
+                fable_valid = False
+            else:
+                fable_valid = (
+                    route.get("model") == FABLE_MODEL
+                    and route.get("effort") in FABLE_EFFORTS
+                    and route.get("server") in FABLE_SERVERS
+                    and (state.get("schema") < 3 or "transport" in route)
+                )
+            valid = valid or fable_valid
         if not valid:
             raise ConfigurationError(f"Routing state has an invalid {label} route: {path}")
     previous = state.get("previous")
@@ -812,14 +835,30 @@ def select_fable_server() -> str:
     )
 
 
-def verify_fable_prerequisites() -> dict[str, str]:
+def _fable_transport_profile(route: dict[str, Any]) -> str:
+    transport = route.get("transport")
+    if transport is None:
+        return FIRST_PARTY_PROFILE
+    if not (
+        isinstance(transport, dict)
+        and transport.get("kind") == "claude-code"
+        and transport.get("profile") in FABLE_TRANSPORT_PROFILES
+        and set(transport) == {"kind", "profile"}
+    ):
+        raise ConfigurationError("The saved Claude Fable 5 transport is invalid.")
+    return transport["profile"]
+
+
+def verify_fable_prerequisites(
+    transport_profile: str = FIRST_PARTY_PROFILE,
+) -> dict[str, str]:
     try:
         from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
     except ImportError as exc:  # pragma: no cover - corrupt package
         raise ConfigurationError("The bundled Claude Fable 5 bridge is missing.") from exc
     try:
         claude = resolve_claude()
-        auth = check_claude_auth(claude)
+        auth = check_claude_auth(claude, transport_profile)
         help_result = subprocess.run(
             [str(claude), "--help"],
             env={
@@ -829,6 +868,7 @@ def verify_fable_prerequisites() -> dict[str, str]:
                 not in {
                     "ANTHROPIC_API_KEY",
                     "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_BASE_URL",
                     "CLAUDE_CODE_USE_BEDROCK",
                     "CLAUDE_CODE_USE_VERTEX",
                     "CLAUDE_CODE_USE_FOUNDRY",
@@ -842,7 +882,14 @@ def verify_fable_prerequisites() -> dict[str, str]:
         )
     except (AdvisorError, OSError, subprocess.TimeoutExpired) as exc:
         raise ConfigurationError(str(exc)) from exc
-    required = ("--model", "--effort", "--safe-mode", "--prompt-suggestions")
+    required = (
+        "--model",
+        "--effort",
+        "--safe-mode",
+        "--prompt-suggestions",
+        "--setting-sources",
+        "--json-schema",
+    )
     missing = [flag for flag in required if flag not in help_result.stdout]
     if help_result.returncode != 0 or missing:
         detail = ", ".join(missing) if missing else f"exit {help_result.returncode}"
@@ -857,7 +904,9 @@ def _route_summary(route: dict[str, Any]) -> str:
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
         effort = "Extra High" if route["effort"] == "max" else route["effort"]
-        return f"Claude Fable 5 {effort}"
+        profile = _fable_transport_profile(route)
+        suffix = " via CC Switch/OpenRouter" if profile == CC_SWITCH_PROFILE else ""
+        return f"Claude Fable 5 {effort}{suffix}"
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1144,19 +1193,25 @@ def _status(
             "model such as current Sol or Terra"
         )
         print(f"Config: {app.config_path}")
+        fable_route_available = True
         if state_matches:
             print(f"Executor: {_route_summary(state['executor'])}")
             advisor = state.get("advisor")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
             if isinstance(advisor, dict) and advisor.get("kind") == "fable":
                 try:
-                    verify_fable_prerequisites()
+                    profile = _fable_transport_profile(advisor)
+                    verify_fable_prerequisites(profile)
                 except ConfigurationError as exc:
+                    fable_route_available = False
                     print(f"Claude Fable 5: unavailable — {exc}")
                 else:
-                    print(
-                        "Claude Fable 5: ready — first-party login; no model call made"
+                    route_label = (
+                        "CC Switch/OpenRouter preflight"
+                        if profile == CC_SWITCH_PROFILE
+                        else "first-party login"
                     )
+                    print(f"Claude Fable 5: ready — {route_label}; no model call made")
             try:
                 verified = verify_agent_routes(
                     app.codex_home,
@@ -1216,6 +1271,7 @@ def _status(
             and routing_state.startswith("installed and effective")
             and state_matches
             and agent_routes_available
+            and fable_route_available
             and not role_issues
             and not orphaned_roles
         )
@@ -1640,7 +1696,8 @@ def main() -> int:
                 advisor = {"kind": "agent", "agent": args.advisor_agent}
             elif args.advisor_fable:
                 server = select_fable_server()
-                fable_auth = verify_fable_prerequisites()
+                profile = args.advisor_fable_transport
+                fable_auth = verify_fable_prerequisites(profile)
                 advisor = {
                     "kind": "fable",
                     "model": FABLE_MODEL,
@@ -1648,6 +1705,10 @@ def main() -> int:
                         "max" if args.advisor_effort == "auto" else args.advisor_effort
                     ),
                     "server": server,
+                    "transport": {
+                        "kind": "claude-code",
+                        "profile": profile,
+                    },
                 }
 
             verified_agents = verify_agent_routes(
@@ -1672,10 +1733,12 @@ def main() -> int:
             print(f"Executor: {_route_summary(executor)}")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
             if fable_auth is not None:
-                print(
-                    "Claude Fable 5 login: ready — first-party; "
-                    "setup makes no model call"
+                profile_label = (
+                    "CC Switch/OpenRouter preflight"
+                    if args.advisor_fable_transport == CC_SWITCH_PROFILE
+                    else "first-party login"
                 )
+                print(f"Claude Fable 5: ready — {profile_label}; setup makes no model call")
             if verified_agents:
                 print(
                     "Custom-agent files: "

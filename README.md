@@ -81,7 +81,7 @@ This creates the default workflow:
 Selected Codex model -> Fable 5 review -> selected model decides -> Luna executes -> selected model verifies
 ```
 
-Fable 5 uses the official Claude Code CLI. You need a compatible first-party Claude login, but you do not need to add an Anthropic API key to Codex.
+Fable 5 uses the official Claude Code CLI. The default route uses a compatible first-party Claude login. An explicitly selected `cc-switch-openrouter-loopback` transport can instead use an existing Claude Code → CC Switch → OpenRouter configuration. You do not need to add an Anthropic API key to Codex, and the loopback transport does not copy the OpenRouter key into Codex state.
 
 After setup, start another new task and work normally.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import io
 import json
 import os
@@ -263,7 +264,7 @@ class NativeRoutingTests(unittest.TestCase):
                     }))
                     raise SystemExit(0)
                 if sys.argv[1:] == ["--help"]:
-                    print("--model --effort --safe-mode --prompt-suggestions")
+                    print("--model --effort --safe-mode --prompt-suggestions --setting-sources --json-schema")
                     raise SystemExit(0)
                 raise SystemExit(2)
                 """
@@ -1011,6 +1012,96 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.run_script("--disable", "--apply")
         self.assertEqual(self.read_fake_config(), initial)
+
+    def test_cc_switch_transport_is_persisted_without_credentials(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        argv = [
+            str(SCRIPT),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "max",
+            "--advisor-fable-transport",
+            NATIVE.CC_SWITCH_PROFILE,
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.dict(
+                os.environ,
+                {"PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            ),
+            mock.patch.object(
+                NATIVE,
+                "verify_fable_prerequisites",
+                return_value={
+                    "claude": str(self.claude),
+                    "auth_method": "gateway",
+                    "api_provider": "OpenRouter",
+                },
+            ) as verify,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        verify.assert_called_once_with(NATIVE.CC_SWITCH_PROFILE)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema"], 3)
+        self.assertEqual(
+            state["advisor"]["transport"],
+            {"kind": "claude-code", "profile": NATIVE.CC_SWITCH_PROFILE},
+        )
+        serialized = json.dumps(state)
+        self.assertNotIn("AUTH_TOKEN", serialized)
+        self.assertNotIn("api_key", serialized.lower())
+        self.assertIn("CC Switch/OpenRouter", stdout.getvalue())
+
+    def test_require_effective_fails_when_configured_fable_is_unavailable(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "max",
+            "--apply",
+        )
+        self.claude.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import sys
+                if sys.argv[1:] == ["auth", "status"]:
+                    print(json.dumps({"loggedIn": False}))
+                    raise SystemExit(0)
+                if sys.argv[1:] == ["--help"]:
+                    print("--model --effort --safe-mode --prompt-suggestions --setting-sources --json-schema")
+                    raise SystemExit(0)
+                raise SystemExit(2)
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.claude.chmod(0o755)
+
+        status = self.run_script("--status", "--require-effective", check=False)
+        self.assertEqual(status.returncode, 1)
+        self.assertIn("Claude Fable 5: unavailable", status.stdout)
 
     def test_missing_or_project_shadowed_custom_agent_is_refused(self) -> None:
         missing = self.run_script(
