@@ -185,7 +185,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertIn("## Quick start with Fable 5", readme)
         self.assertIn(
-            "advisor: Claude Fable 5 High",
+            "advisor: Claude Fable 5 Extra High",
             readme,
         )
         self.assertNotIn("advisor: GPT-5.6 Terra", readme)

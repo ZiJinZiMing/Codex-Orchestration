@@ -2,6 +2,11 @@
 
 Bring models like Claude Fable 5 into Codex, give them roles, and make them work together.
 
+Chinese guides for the CC Switch/OpenRouter workflow:
+
+- [使用手册：如何启动和使用](docs/zh-CN/usage.md)
+- [Mac 与 Windows 配置、故障排查和 FAQ](docs/zh-CN/troubleshooting.md)
+
 ## What does it do?
 
 Codex Orchestration turns one Codex task into a multi-model workflow.
@@ -72,7 +77,7 @@ Setup requires Python 3.11 or newer.
 Select the model you want to lead the task, then run:
 
 ```text
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
+/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 Extra High
 ```
 
 This creates the default workflow:
@@ -150,7 +155,7 @@ Codex still owns the Goal. The plugin controls the model workflow inside it.
 ```text
 /codex-orchestration status
 /codex-orchestration status --require-effective
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
+/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 Extra High
 /codex-orchestration disable
 ```
 
