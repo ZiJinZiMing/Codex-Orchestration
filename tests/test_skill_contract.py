@@ -50,6 +50,7 @@ class SkillContractTests(unittest.TestCase):
 
     def test_native_policy_manages_only_required_fields(self) -> None:
         for field in (
+            "enabled",
             "hide_spawn_agent_metadata",
             "tool_namespace",
             "multi_agent_mode_hint_text",
@@ -59,7 +60,7 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(field, NATIVE_SCRIPT)
         self.assertIn('`tool_namespace = "agents"`', SKILL)
         self.assertIn("reserved `collaboration.spawn_agent` schema", SKILL)
-        self.assertIn("Do not add `enabled = true`", SKILL)
+        self.assertIn("explicitly enables multi-agent v2", SKILL)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', NATIVE_SCRIPT)
 
     def test_native_config_uses_codex_app_server(self) -> None:
@@ -86,7 +87,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("This policy does not create or change a Goal", NATIVE_SCRIPT)
 
     def test_mixed_client_compatibility_is_capability_detected(self) -> None:
-        self.assertIn("capability-tests the complete four-field preset", SKILL)
+        self.assertIn("capability-tests the complete v2 control preset", SKILL)
         self.assertIn("isolated `CODEX_HOME`", REFERENCE)
         self.assertIn("--allow-incompatible-client", SKILL)
         self.assertIn("Disable must remain available", SKILL)
@@ -135,7 +136,11 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("All bundled variants are disabled by default", SKILL)
         self.assertIn("first-party Pro or Max account", SKILL)
         self.assertIn("never extracts a token", SKILL)
-        self.assertIn("runtime `modelUsage` to confirm `claude-fable-5`", SKILL)
+        self.assertIn(
+            "runtime `modelUsage`, after deduplication, to be exactly",
+            SKILL,
+        )
+        self.assertIn('used_models = ["claude-fable-5"]', SKILL)
         self.assertIn("call the configured MCP server's `review_plan` tool", SKILL)
         self.assertIn("instead of spawning an advisor child", SKILL)
         self.assertIn("use the exact name `Claude Fable 5`", SKILL)
@@ -145,6 +150,11 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Direct model overrides keep the root's provider", SKILL)
         self.assertIn("target model is on the same provider", NATIVE_SCRIPT)
         self.assertIn("require a custom agent that pins model_provider", NATIVE_SCRIPT)
+        self.assertIn(
+            'model = \\"claude-fable-5\\" and used_models = ',
+            NATIVE_SCRIPT,
+        )
+        self.assertIn("do not release executor work", NATIVE_SCRIPT)
 
     def test_advisor_is_bounded_root_only_and_failure_is_not_approval(self) -> None:
         self.assertIn("PLAN_APPROVED", SKILL)

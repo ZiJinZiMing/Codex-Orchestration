@@ -24,7 +24,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.5.0")
+        self.assertTrue(manifest["version"].startswith("0.5.0+codex."))
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],

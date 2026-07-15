@@ -237,20 +237,29 @@ for line in sys.stdin:
 
 
 class NativeRoutingTests(unittest.TestCase):
+    def write_executable(self, path: Path, source: str) -> Path:
+        script = path.with_suffix(".py") if os.name == "nt" else path
+        script.write_text(textwrap.dedent(source), encoding="utf-8")
+        if os.name != "nt":
+            script.chmod(0o755)
+            return script
+        launcher = path.with_suffix(".cmd")
+        launcher.write_text(
+            f'@"{sys.executable}" "{script}" %*\n', encoding="utf-8"
+        )
+        return launcher
+
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=os.name == "nt")
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.codex = self.root / "fake-codex"
-        self.codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        self.codex.chmod(0o755)
+        self.codex = self.write_executable(self.root / "fake-codex", FAKE_CODEX)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.claude = self.bin / "claude"
-        self.claude.write_text(
-            textwrap.dedent(
-                """\
+        self.claude = self.write_executable(
+            self.bin / "claude",
+            """\
                 #!/usr/bin/env python3
                 import json
                 import sys
@@ -263,14 +272,11 @@ class NativeRoutingTests(unittest.TestCase):
                     }))
                     raise SystemExit(0)
                 if sys.argv[1:] == ["--help"]:
-                    print("--model --effort --safe-mode --prompt-suggestions")
+                    print("--model --effort --safe-mode --setting-sources --prompt-suggestions")
                     raise SystemExit(0)
                 raise SystemExit(2)
-                """
-            ),
-            encoding="utf-8",
+                """,
         )
-        self.claude.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -283,6 +289,8 @@ class NativeRoutingTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         compatibility = ["--allow-incompatible-client"] if allow_incompatible else []
         env = os.environ.copy()
+        env["HOME"] = str(self.root)
+        env["USERPROFILE"] = str(self.root)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         result = subprocess.run(
             [
@@ -354,6 +362,7 @@ class NativeRoutingTests(unittest.TestCase):
             supported, _ = NATIVE.supports_native_policy(self.codex)
         self.assertTrue(supported)
         argv = run.call_args.args[0]
+        self.assertIn("features.multi_agent_v2.enabled=true", argv)
         self.assertIn(
             'features.multi_agent_v2.tool_namespace="agents"',
             argv,
@@ -387,6 +396,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Native routing policy installed", applied.stdout)
         config = self.read_fake_config()
         feature = config["features"]["multi_agent_v2"]
+        self.assertTrue(feature["enabled"])
         self.assertEqual(feature["max_concurrent_threads_per_session"], 5)
         self.assertFalse(feature["hide_spawn_agent_metadata"])
         self.assertEqual(feature["tool_namespace"], "agents")
@@ -395,7 +405,7 @@ class NativeRoutingTests(unittest.TestCase):
 
         status = self.run_script("--status")
         self.assertIn("Native policy: installed and effective", status.stdout)
-        self.assertIn("V2 activation: not inferred", status.stdout)
+        self.assertIn("V2 activation: enabled", status.stdout)
         self.assertIn("Executor: gpt-5.6-luna@xhigh", status.stdout)
         self.assertIn("Advisor: none", status.stdout)
         self.assertIn("V2 tool namespace: agents", status.stdout)
@@ -409,6 +419,36 @@ class NativeRoutingTests(unittest.TestCase):
         feature = self.read_fake_config()["features"]["multi_agent_v2"]
         self.assertEqual(feature, {"max_concurrent_threads_per_session": 5})
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_legacy_thread_limit_is_migrated_and_restored(self) -> None:
+        initial = {
+            "features": {"multi_agent_v2": {}},
+            "agents": {"max_threads": 4, "max_depth": 1},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        config = self.read_fake_config()
+        self.assertTrue(config["features"]["multi_agent_v2"]["enabled"])
+        self.assertEqual(
+            config["features"]["multi_agent_v2"][
+                "max_concurrent_threads_per_session"
+            ],
+            5,
+        )
+        self.assertNotIn("max_threads", config["agents"])
+        self.assertEqual(config["agents"]["max_depth"], 1)
+
+        self.run_script("--disable", "--apply")
+        self.assertEqual(self.read_fake_config(), initial)
 
     def test_existing_user_policy_requires_explicit_replace_and_is_restored(self) -> None:
         initial = {
@@ -476,6 +516,9 @@ class NativeRoutingTests(unittest.TestCase):
             "--executor-effort",
             "high",
             "--apply",
+        )
+        self.assertTrue(
+            self.read_fake_config()["features"]["multi_agent_v2"]["enabled"]
         )
         self.run_script(
             "--executor-model",
@@ -598,9 +641,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(feature["tool_namespace"], "agents")
 
     def test_incompatible_client_blocks_setup_but_never_disable(self) -> None:
-        old_codex = self.root / "old-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        old_codex = self.write_executable(self.root / "old-codex", FAKE_CODEX)
         refused = self.run_script(
             "--executor-model",
             "gpt-5.6-luna",
@@ -644,9 +685,9 @@ class NativeRoutingTests(unittest.TestCase):
             "high",
             "--apply",
         )
-        old_codex = self.root / "old-status-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        old_codex = self.write_executable(
+            self.root / "old-status-codex", FAKE_CODEX
+        )
         incompatible = self.run_script(
             "--status",
             "--require-effective",
@@ -766,7 +807,7 @@ class NativeRoutingTests(unittest.TestCase):
             "managed_by": "codex-orchestration",
             "config_file": str(self.home / "config.toml"),
         }
-        with mock.patch.object(NATIVE.os, "fchmod", None):
+        with mock.patch.object(NATIVE.os, "fchmod", None, create=True):
             NATIVE._write_state(state_path, state)
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
 
@@ -983,13 +1024,20 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertIn("Claude Fable 5 Extra High", setup.stdout)
         config = self.read_fake_config()
-        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
-        self.assertTrue(servers["fable-advisor-python3"]["enabled"])
-        self.assertFalse(servers["fable-advisor-python"]["enabled"])
-        self.assertNotIn("fable-advisor-py", servers)
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
+        selected_server = state["advisor"]["server"]
+        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        self.assertTrue(servers[selected_server]["enabled"])
+        self.assertTrue(
+            all(
+                not entry["enabled"]
+                for server, entry in servers.items()
+                if server != selected_server
+            )
+        )
+        self.assertNotIn("fable-advisor-py", servers)
         self.assertEqual(state["advisor"]["kind"], "fable")
         self.assertEqual(state["advisor"]["model"], "claude-fable-5")
         self.assertIn("mcp", state["previous"])

@@ -3,8 +3,10 @@
 ## 0.5.0 — Unreleased
 
 - Add Claude Fable 5 as an opt-in, root-only advisor through a bundled local MCP bridge to the authenticated Claude Code CLI.
+- Add explicit `subscription`, `api`, and fail-closed `auto` Fable authentication modes with non-secret API-source selection, while keeping credentials out of routing state and tool results.
+- Explicitly enable multi-agent v2 and migrate the incompatible legacy `agents.max_threads` limit to the v2 session limit while preserving disable restoration.
 - Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
-- Pin `claude-fable-5`, remove provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model are valid.
+- Pin every Claude Code model slot to `claude-fable-5`, suppress the Haiku-backed automatic session-title request, omit model fallback, disable tools and session persistence, and fail closed unless runtime `modelUsage` contains only Fable.
 - Add automation-safe native status gating with `--require-effective`.
 - Detect orphaned managed personal roles and distinguish installed policy from live route validation.
 - Fail truthfully when restore-state persistence and config rollback do not both succeed.

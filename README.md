@@ -81,7 +81,7 @@ This creates the default workflow:
 Selected Codex model -> Fable 5 review -> selected model decides -> Luna executes -> selected model verifies
 ```
 
-Fable 5 uses the official Claude Code CLI. You need a compatible first-party Claude login, but you do not need to add an Anthropic API key to Codex.
+Fable 5 uses the official Claude Code CLI. Setup supports an explicit subscription login or an Anthropic-compatible API/Gateway credential from either the process environment or Claude Code user settings. With the API/Gateway route, you do not need to add an Anthropic API key to Codex. `auto` never silently selects an API route: when API configuration exists, setup requires the explicit mode and source. Credentials remain in their existing location and are never copied into Codex routing state.
 
 After setup, start another new task and work normally.
 

@@ -101,14 +101,15 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --apply
 ```
 
-Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable --advisor-effort max`. The configurator requires Claude Code to be logged in through a first-party Pro or Max account, chooses an available Python 3.11+ MCP launcher, and performs only an auth/capability check during setup. It never extracts a token, writes a credential, or makes a model call during setup or status. Omission persists `advisor: none`.
+Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable --advisor-effort max --advisor-auth-mode auto`. The authentication mode is `subscription`, `api`, or `auto`. `auto` checks subscription only when no API credential is configured; when API configuration exists it fails closed and requires explicit `--advisor-auth-mode api --advisor-api-source environment|user-settings`, preventing an accidental metered route. The configurator chooses an available Python 3.11+ MCP launcher and performs only an auth/capability check during setup. It never extracts a token, writes a credential, or makes a model call during setup or status. Omission persists `advisor: none`.
 
-The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
+The configurator capability-tests the complete v2 control preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
 For the current validated v2 direct route, set `tool_namespace = "agents"`. Live testing on Desktop `0.144.0-alpha.4` showed that the default reserved `collaboration.spawn_agent` schema rejected expanded model/effort metadata, while `agents` accepted the same request and spawned Luna at `xhigh`. Treat this as a required control-surface setting for that tested path, not as the executor selection. `usage_hint_text` carries the actual executor/advisor route.
 
-Do not add `enabled = true` for a Sol or Terra root. Their current model metadata selects v2. The configurator intentionally manages these routing fields:
+The configurator explicitly enables multi-agent v2. On Codex 0.144.4, `agents.max_threads` cannot coexist with v2; setup moves that legacy child limit to `max_concurrent_threads_per_session` and adds one slot for the root, while disable restores the original fields. It intentionally manages:
 
+- `features.multi_agent_v2.enabled`;
 - `features.multi_agent_v2.hide_spawn_agent_metadata`;
 - `features.multi_agent_v2.tool_namespace`;
 - `features.multi_agent_v2.multi_agent_mode_hint_text`;
@@ -116,7 +117,7 @@ Do not add `enabled = true` for a Sol or Terra root. Their current model metadat
 
 When Claude Fable 5 is selected, it additionally manages only the plugin-scoped `enabled` override for the chosen bundled MCP launcher and any launcher variant already overridden by the user. All bundled variants are disabled by default. The original override values are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
 
-It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the four routing fields plus the narrowly scoped MCP overrides only when Fable is selected; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
+It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the v2 controls, any migrated thread limit, and the narrowly scoped MCP overrides only when Fable is selected; the namespaced state also records schema/version markers, config path, selected seats, Fable's non-secret authentication-mode enum, and scalar-conversion metadata when needed. It never stores a credential, endpoint, account identifier, or plan metadata. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
 
 If a user-authored mode or usage hint already exists, do not replace it automatically. Show the conflict. Use `--replace-existing-policy` only after the user explicitly approves replacing and later restoring those exact values.
 
@@ -134,7 +135,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --status --require-effective
 ```
 
-Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, unavailable agent routes, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, the configured executor and advisor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
+Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, unavailable advisor or agent routes, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, the configured executor and advisor, Fable's configured authentication mode and currently selected authentication path, whether v2 and the personal policy are effective in that workspace, whether spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live child route; only fresh child-session metadata does.
 
 To change seats, run normal `setup` again. The configurator keeps the original restore snapshot rather than treating its own managed values as user settings.
 
@@ -158,17 +159,18 @@ For personal v0.4 custom roles, preview and apply removal with `configure_orches
 
 Use this built-in route when the user names Claude Fable 5. Do not create a custom provider or custom-agent file for it.
 
-In every user-facing status or result, use the exact name `Claude Fable 5`. Report authentication as `first-party login ready`; do not expose or restate Claude account-plan metadata.
+In every user-facing status or result, use the exact name `Claude Fable 5`. Report the configured mode and active path as `subscription` or `api`; do not expose or restate credentials, endpoints, or account identifiers, and do not expose or restate Claude account-plan metadata.
 
 Prerequisites:
 
 - the official `claude` CLI is installed;
-- `claude auth status` reports a first-party Pro or Max login;
+- `subscription` mode has a first-party Pro or Max account login and no configured API credential;
+- `api` mode has `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `apiKeyHelper` configured in the explicitly saved `environment` or `user-settings` source;
 - a Python 3.11+ launcher is available.
 
-The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly the compatible variant through the plugin's namespaced config. At review time the MCP server removes API-key and Bedrock/Vertex/Foundry override variables, re-checks first-party login, and invokes `claude -p --model claude-fable-5` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. The saved route pins the model and effort; the root cannot replace them through tool arguments.
+The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly the compatible variant through the plugin's namespaced config. The bridge excludes Bedrock/Vertex/Foundry in every mode. `subscription` removes API keys, auth tokens, Base URL, custom headers, and user/project/local settings, and fails closed if an API credential is configured. `api` accepts only the explicitly saved `environment` or `user-settings` source, removes injected Claude OAuth overrides, and does not require subscription metadata. For `user-settings`, the review subprocess extracts only API credential/transport values (or the `apiKeyHelper` path), then runs with `--setting-sources ""`; other user settings cannot override the strict route. API calls use `--bare`. `auto` uses subscription when no API credential source exists and otherwise requires explicit API mode and source. The bridge invokes `claude -p --model claude-fable-5` with a fixed session name, `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, automatic session-title traffic disabled, every built-in default-model slot pinned to `claude-fable-5`, no `--fallback-model`, and JSON output. The saved route pins the model, effort, authentication-mode enum, and non-secret API-source enum; the root cannot replace them through tool arguments.
 
-The bridge accepts only one self-contained `packet`. It requires `PLAN_APPROVED` or `PLAN_REVISE` as the first non-empty line and requires runtime `modelUsage` to confirm `claude-fable-5`. Any auth, transport, format, or model-confirmation failure is `advisor unavailable`, never approval. It returns no account identifier or credential.
+The bridge accepts only one self-contained `packet`. It requests `PLAN_APPROVED` or `PLAN_REVISE` as the first non-empty line and requires runtime `modelUsage`, after deduplication, to be exactly `["claude-fable-5"]`. Missing metadata or any additional model makes the MCP result an error before a decision can be returned. If an exclusively confirmed Fable response omits the marker, the bridge conservatively returns `PLAN_REVISE`, never approval. Any auth, transport, empty-response, or model-confirmation failure is `advisor unavailable`. It returns no account identifier or credential.
 
 ## Durable or cross-provider custom agents
 
@@ -254,7 +256,7 @@ Direct model overrides keep the root's provider. Before a direct spawn, establis
 
 After spawning, use the tool result or client metadata to confirm the accepted route. Distinguish:
 
-- `native policy installed`: the managed user policy exists; v2 activation still depends on the selected root and effective workspace config;
+- `native policy installed`: the managed user policy exists; activation still depends on effective workspace config;
 - `pinned custom agent available`: a matching role is loaded, but has not run;
 - `route accepted`: the current tool accepted and validated the requested route controls;
 - `used and confirmed`: use only when the client explicitly exposes effective runtime model/provider/effort metadata;
@@ -285,7 +287,7 @@ PLAN_REVISE
 
 `PLAN_APPROVED` means no material gap was found in the supplied packet, not that success is guaranteed. `PLAN_REVISE` must give prioritized material gaps and a concrete correction for each. Style preferences do not justify revision.
 
-The root adjudicates every suggestion and owns the revised plan. Allow at most one confirmation pass after a material revision. A configured advisor is a gate for a non-trivial executor plan by default. Transport failure, malformed output, inaccessible routing, or missing context means `advisor unavailable`, never approval; stop before executor work unless the user explicitly made the advisor best-effort.
+The root adjudicates every suggestion and owns the revised plan. Allow at most one confirmation pass after a material revision. A configured advisor is a gate for a non-trivial executor plan by default. The response must report `model = "claude-fable-5"` and `used_models = ["claude-fable-5"]`; missing or mixed model metadata, transport failure, malformed output, inaccessible routing, or missing context means `advisor unavailable`, never approval. Stop before executor work unless the user explicitly made the advisor best-effort.
 
 For Claude Fable 5, call the configured MCP server's `review_plan` tool instead of spawning an advisor child. It remains root-only and read-only; executors never receive the tool or direct it.
 

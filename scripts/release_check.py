@@ -25,18 +25,19 @@ def run_check(root: Path, require_tag: bool) -> str:
     version = manifest.get("version")
     if not isinstance(version, str) or not SEMVER_RE.fullmatch(version):
         raise ReleaseCheckError(f"manifest version is not semantic: {version!r}")
+    release_version = version.split("+", 1)[0]
 
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     match = CHANGELOG_VERSION_RE.search(changelog)
     if match is None:
         raise ReleaseCheckError("changelog has no version heading")
-    if match.group(1) != version:
+    if match.group(1) != release_version:
         raise ReleaseCheckError(
             f"manifest version {version} does not match latest changelog {match.group(1)}"
         )
 
     lifecycle = (root / "tests/plugin_lifecycle_smoke.py").read_text(encoding="utf-8")
-    if f'NEW_VERSION = "{version}"' not in lifecycle:
+    if f'NEW_VERSION = "{release_version}"' not in lifecycle:
         raise ReleaseCheckError("lifecycle NEW_VERSION does not match the manifest")
 
     if require_tag:
@@ -51,13 +52,13 @@ def run_check(root: Path, require_tag: bool) -> str:
         )
         if result.returncode != 0:
             raise ReleaseCheckError(f"could not inspect release tags: {result.stderr.strip()}")
-        expected = f"v{version}"
+        expected = f"v{release_version}"
         if expected not in result.stdout.splitlines():
             raise ReleaseCheckError(f"HEAD is not tagged with {expected}")
         if match.group(2).strip().lower() == "unreleased":
             raise ReleaseCheckError("tagged release still says Unreleased in CHANGELOG.md")
 
-    return version
+    return release_version
 
 
 def main() -> int:
