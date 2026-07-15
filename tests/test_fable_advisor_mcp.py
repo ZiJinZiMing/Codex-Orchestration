@@ -301,6 +301,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.assertEqual(
             opener.open.call_args.kwargs["timeout"], FABLE.DIRECT_API_TIMEOUT_SECONDS
         )
+        self.assertEqual(FABLE.DIRECT_API_TIMEOUT_SECONDS, 600)
         headers = {name.lower(): value for name, value in request.header_items()}
         self.assertEqual(headers["authorization"], "Bearer secret-token")
         self.assertEqual(headers["anthropic-version"], "2023-06-01")
@@ -311,7 +312,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             body,
             {
                 "model": "claude-fable-5",
-                "max_tokens": 4096,
+                "max_tokens": 65536,
                 "system": FABLE.SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": "complete packet"}],
             },

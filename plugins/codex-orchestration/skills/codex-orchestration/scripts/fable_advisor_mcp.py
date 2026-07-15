@@ -28,8 +28,8 @@ API_SOURCES = {"environment", "user-settings"}
 TRANSPORTS = {"claude-code", "direct-api"}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
-DIRECT_API_TIMEOUT_SECONDS = 120
-DIRECT_API_MAX_TOKENS = 4096
+DIRECT_API_TIMEOUT_SECONDS = 600
+DIRECT_API_MAX_TOKENS = 65536
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -391,7 +391,6 @@ def check_claude_auth(
         raise AdvisorError(f"Unsupported Claude API source: {api_source!r}.")
     if auth_mode != "api" and api_source is not None:
         raise AdvisorError("Claude API source is valid only in api authentication mode.")
-    api_sources = set(api_credential_sources())
     route_sources = set(api_route_sources())
     if auth_mode == "auto" and route_sources:
         raise AdvisorError(
