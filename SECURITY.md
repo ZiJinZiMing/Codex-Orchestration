@@ -17,4 +17,4 @@ Do not include credentials, tokens, or private configuration. You should receive
 
 ## Security boundaries
 
-Codex-Orchestration writes only its documented Codex routing fields and managed custom-agent files. It does not create providers, handle provider credentials, weaken sandbox or approval settings, or guarantee that policy-guided routing is engine-enforced. See the README for the exact runtime-verification boundary.
+Codex-Orchestration writes only its documented Codex routing fields and managed custom-agent files. It does not create providers, solicit or persist provider credentials, log selected API credentials, weaken sandbox or approval settings, or guarantee that policy-guided routing is engine-enforced. The optional direct Fable transport reads one explicitly selected credential into process memory only long enough to send one fail-closed request. See the README for the exact runtime-verification boundary.

@@ -4,6 +4,7 @@
 
 - Add Claude Fable 5 as an opt-in, root-only advisor through a bundled local MCP bridge to the authenticated Claude Code CLI.
 - Add explicit `subscription`, `api`, and fail-closed `auto` Fable authentication modes with non-secret API-source selection, while keeping credentials out of routing state and tool results.
+- Add an explicit `direct-api` Fable transport that sends one strict Anthropic-compatible Messages request without requiring Claude Code or a subscription; keep the existing `claude-code` transport as the backward-compatible default and never fall back between them.
 - Explicitly enable multi-agent v2 and migrate the incompatible legacy `agents.max_threads` limit to the v2 session limit while preserving disable restoration.
 - Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
 - Pin every Claude Code model slot to `claude-fable-5`, suppress the Haiku-backed automatic session-title request, omit model fallback, disable tools and session persistence, and fail closed unless runtime `modelUsage` contains only Fable.

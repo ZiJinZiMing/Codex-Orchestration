@@ -10,17 +10,29 @@ import shutil
 import subprocess
 import sys
 from typing import Any
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 
 STATE_FILENAME = ".codex-orchestration-routing.json"
 FABLE_MODEL = "claude-fable-5"
 ALLOWED_MODELS = frozenset({FABLE_MODEL})
+ALLOWED_DIRECT_RESPONSE_MODELS = frozenset(
+    {FABLE_MODEL, f"anthropic/{FABLE_MODEL}"}
+)
 REVIEW_SESSION_NAME = "codex-fable-review"
 SUPPORTED_EFFORTS = {"low", "medium", "high", "max"}
 AUTH_MODES = {"subscription", "api", "auto"}
 API_SOURCES = {"environment", "user-settings"}
+TRANSPORTS = {"claude-code", "direct-api"}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
+DIRECT_API_TIMEOUT_SECONDS = 120
+DIRECT_API_MAX_TOKENS = 4096
+ANTHROPIC_VERSION = "2023-06-01"
+DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 API_CREDENTIAL_ENV = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -54,6 +66,21 @@ Use PLAN_APPROVED only when no material gap is present. Use PLAN_REVISE when cor
 
 class AdvisorError(RuntimeError):
     pass
+
+
+class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    """Fail closed instead of forwarding API credentials across redirects."""
+
+    def redirect_request(
+        self,
+        req: urllib_request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
 
 
 def codex_home() -> Path:
@@ -120,6 +147,104 @@ def user_settings_api_invocation(
     }
     helper = settings.get("apiKeyHelper")
     return api_env, helper if isinstance(helper, str) and helper else None
+
+
+def api_invocation_for_source(
+    api_source: str, home: Path | None = None
+) -> tuple[dict[str, str], str | None]:
+    if api_source == "environment":
+        return (
+            {
+                name: value
+                for name in API_TRANSPORT_ENV
+                if isinstance((value := os.environ.get(name)), str) and value
+            },
+            None,
+        )
+    if api_source == "user-settings":
+        return user_settings_api_invocation(home)
+    raise AdvisorError(f"Unsupported Claude API source: {api_source!r}.")
+
+
+def check_api_auth(
+    api_source: str | None, home: Path | None = None
+) -> dict[str, str]:
+    if api_source not in API_SOURCES:
+        raise AdvisorError(
+            "Claude api mode requires an explicit API source: environment or user-settings."
+        )
+    api_sources = set(api_credential_sources(home))
+    if api_source not in api_sources:
+        raise AdvisorError(
+            f"Claude API credentials are not configured in the saved {api_source} source."
+        )
+    conflicting_sources = set(api_route_sources(home)) - {api_source}
+    if conflicting_sources:
+        raise AdvisorError(
+            "Claude API/Gateway configuration exists in more than the saved source; "
+            "remove the conflicting source before using api mode."
+        )
+    return {
+        "auth_mode": "api",
+        "auth_path": "api",
+        "auth_method": "api",
+        "api_source": api_source,
+    }
+
+
+def _direct_api_endpoint(base_url: str) -> str:
+    try:
+        parsed = urllib_parse.urlsplit(base_url)
+    except ValueError as exc:
+        raise AdvisorError("Direct API base URL is invalid.") from exc
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise AdvisorError("Direct API base URL is invalid.")
+    if parsed.scheme == "http":
+        if parsed.hostname not in LOCAL_HTTP_HOSTS:
+            raise AdvisorError("Direct API requires HTTPS except for exact localhost hosts.")
+    elif parsed.scheme != "https":
+        raise AdvisorError("Direct API base URL must use HTTPS.")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise AdvisorError("Direct API base URL is invalid.") from exc
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    authority = f"{host}:{port}" if port is not None else host
+    path = parsed.path.rstrip("/")
+    return urllib_parse.urlunsplit(
+        (parsed.scheme, authority, f"{path}/v1/messages", "", "")
+    )
+
+
+def direct_api_configuration(
+    api_source: str, home: Path | None = None
+) -> tuple[dict[str, str], str, dict[str, str]]:
+    auth = check_api_auth(api_source, home)
+    api_env, api_key_helper = api_invocation_for_source(api_source, home)
+    if api_key_helper:
+        raise AdvisorError("Direct API does not support Claude Code apiKeyHelper.")
+    if api_env.get("ANTHROPIC_CUSTOM_HEADERS"):
+        raise AdvisorError("Direct API does not support ANTHROPIC_CUSTOM_HEADERS.")
+    auth_token = api_env.get("ANTHROPIC_AUTH_TOKEN")
+    api_key = api_env.get("ANTHROPIC_API_KEY")
+    if auth_token and api_key:
+        raise AdvisorError("Direct API credential source is ambiguous.")
+    if auth_token:
+        credential_header = {"Authorization": f"Bearer {auth_token}"}
+    elif api_key:
+        credential_header = {"x-api-key": api_key}
+    else:
+        raise AdvisorError("Direct API requires one static API credential.")
+    endpoint = _direct_api_endpoint(
+        api_env.get("ANTHROPIC_BASE_URL", DEFAULT_ANTHROPIC_BASE_URL)
+    )
+    return credential_header, endpoint, auth
 
 
 def api_credential_sources(home: Path | None = None) -> tuple[str, ...]:
@@ -262,7 +387,6 @@ def check_claude_auth(
 ) -> dict[str, str]:
     if auth_mode not in AUTH_MODES:
         raise AdvisorError(f"Unsupported Claude authentication mode: {auth_mode!r}.")
-    executable = claude or resolve_claude()
     if api_source is not None and api_source not in API_SOURCES:
         raise AdvisorError(f"Unsupported Claude API source: {api_source!r}.")
     if auth_mode != "api" and api_source is not None:
@@ -276,26 +400,9 @@ def check_claude_auth(
         )
     auth_path = "subscription" if auth_mode == "auto" else auth_mode
     if auth_path == "api":
-        if api_source is None:
-            raise AdvisorError(
-                "Claude api mode requires an explicit API source: environment or user-settings."
-            )
-        if api_source not in api_sources:
-            raise AdvisorError(
-                f"Claude API credentials are not configured in the saved {api_source} source."
-            )
-        conflicting_sources = route_sources - {api_source}
-        if conflicting_sources:
-            raise AdvisorError(
-                "Claude API/Gateway configuration exists in more than the saved source; "
-                "remove the conflicting source before using api mode."
-            )
-        return {
-            "auth_mode": auth_mode,
-            "auth_path": "api",
-            "auth_method": "api",
-            "api_source": api_source,
-        }
+        result = check_api_auth(api_source)
+        result["auth_mode"] = auth_mode
+        return result
     if route_sources:
         raise AdvisorError(
             "Claude API/Gateway configuration is present, so subscription mode cannot prove that the "
@@ -303,6 +410,7 @@ def check_claude_auth(
             "explicitly, or remove the API configuration."
         )
 
+    executable = claude or resolve_claude()
     payload = _run_json(
         [str(executable), "auth", "status"],
         timeout=AUTH_TIMEOUT_SECONDS,
@@ -347,6 +455,7 @@ def load_fable_route(home: Path | None = None) -> dict[str, str]:
     effort = route.get("effort")
     auth_mode = route.get("auth_mode", "subscription")
     api_source = route.get("api_source")
+    transport = route.get("transport", "claude-code")
     if model != FABLE_MODEL or effort not in SUPPORTED_EFFORTS:
         raise AdvisorError("The saved Claude Fable 5 route is invalid.")
     if auth_mode not in AUTH_MODES:
@@ -355,16 +464,35 @@ def load_fable_route(home: Path | None = None) -> dict[str, str]:
         raise AdvisorError("The saved Claude Fable 5 API source is invalid.")
     if auth_mode != "api" and api_source is not None:
         raise AdvisorError("The saved Claude Fable 5 API source is unexpected.")
-    result = {"model": model, "effort": effort, "auth_mode": auth_mode}
+    if transport not in TRANSPORTS:
+        raise AdvisorError("The saved Claude Fable 5 transport is invalid.")
+    if transport == "direct-api" and auth_mode != "api":
+        raise AdvisorError("Direct API transport requires Claude api authentication mode.")
+    result = {
+        "model": model,
+        "effort": effort,
+        "auth_mode": auth_mode,
+        "transport": transport,
+    }
     if api_source is not None:
         result["api_source"] = api_source
     return result
 
 
-def review_plan(packet: str) -> dict[str, Any]:
-    if not isinstance(packet, str) or not packet.strip():
-        raise AdvisorError("`packet` must be a non-empty self-contained review packet.")
-    route = load_fable_route()
+def _normalize_review(review: str) -> tuple[str, str]:
+    review = review.strip()
+    if not review:
+        raise AdvisorError("Claude Fable 5 returned an empty review.")
+    first = next((line.strip() for line in review.splitlines() if line.strip()), "")
+    if first not in {"PLAN_APPROVED", "PLAN_REVISE"}:
+        first = "PLAN_REVISE"
+        review = f"{first}\n\n{review}"
+    return first, review
+
+
+def _review_plan_claude_code(
+    packet: str, route: dict[str, str]
+) -> dict[str, Any]:
     claude = resolve_claude()
     auth = check_claude_auth(
         claude, route["auth_mode"], route.get("api_source")
@@ -455,13 +583,7 @@ def review_plan(packet: str) -> dict[str, Any]:
             payload["result"] = "\n".join(assistant_text)
     if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
         raise AdvisorError("Claude Fable 5 returned an unexpected response.")
-    review = payload["result"].strip()
-    if not review:
-        raise AdvisorError("Claude Fable 5 returned an empty review.")
-    first = next((line.strip() for line in review.splitlines() if line.strip()), "")
-    if first not in {"PLAN_APPROVED", "PLAN_REVISE"}:
-        first = "PLAN_REVISE"
-        review = f"{first}\n\n{review}"
+    first, review = _normalize_review(payload["result"])
     usage = payload.get("modelUsage")
     if not isinstance(usage, dict) or not usage:
         raise AdvisorError(
@@ -481,11 +603,124 @@ def review_plan(packet: str) -> dict[str, Any]:
         "auth_mode": auth["auth_mode"],
         "auth_path": auth["auth_path"],
         "auth_method": auth["auth_method"],
+        "transport": "claude-code",
         "used_models": used_models,
     }
     if "api_source" in auth:
         response["api_source"] = auth["api_source"]
     return response
+
+
+def _review_plan_direct_api(
+    packet: str, route: dict[str, str]
+) -> dict[str, Any]:
+    api_source = route.get("api_source")
+    if api_source not in API_SOURCES:
+        raise AdvisorError("Direct API transport requires an explicit API source.")
+    credential_header, endpoint, auth = direct_api_configuration(api_source)
+    body = {
+        "model": FABLE_MODEL,
+        "max_tokens": DIRECT_API_MAX_TOKENS,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": packet}],
+    }
+    headers = {
+        "content-type": "application/json",
+        "anthropic-version": ANTHROPIC_VERSION,
+        **credential_header,
+    }
+    request = urllib_request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    opener = urllib_request.build_opener(NoRedirectHandler())
+    try:
+        with opener.open(request, timeout=DIRECT_API_TIMEOUT_SECONDS) as response:
+            status = response.getcode()
+            if not isinstance(status, int) or not 200 <= status < 300:
+                raise AdvisorError("Direct API returned an unsuccessful HTTP status.")
+            raw = response.read()
+    except urllib_error.HTTPError as exc:
+        status = exc.code if isinstance(exc.code, int) else "unknown"
+        exc.close()
+        raise AdvisorError(f"Direct API request failed with HTTP status {status}.") from None
+    except (TimeoutError, urllib_error.URLError, OSError):
+        raise AdvisorError("Direct API request failed due to a network or timeout error.") from None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise AdvisorError("Direct API returned malformed JSON.") from None
+    if not isinstance(payload, dict):
+        raise AdvisorError("Direct API returned an unexpected JSON value.")
+    response_model = payload.get("model")
+    if (
+        not isinstance(response_model, str)
+        or response_model not in ALLOWED_DIRECT_RESPONSE_MODELS
+    ):
+        raise AdvisorError(
+            "Strict model verification failed: direct API returned an unapproved model echo."
+        )
+    if payload.get("stop_reason") != "end_turn":
+        raise AdvisorError("Direct API response did not complete with end_turn.")
+    content = payload.get("content")
+    if not isinstance(content, list):
+        raise AdvisorError("Direct API returned an unexpected response.")
+    text_blocks = [
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        and block["text"].strip()
+    ]
+    if not text_blocks:
+        raise AdvisorError("Direct API returned no review text.")
+    first, review = _normalize_review("\n".join(text_blocks))
+    return {
+        "decision": first,
+        "review": review,
+        "model": FABLE_MODEL,
+        "response_model": response_model,
+        "model_echo_policy": "exact-allowlist-v1",
+        "effort": "not-applied",
+        "configured_effort": route["effort"],
+        "auth_mode": auth["auth_mode"],
+        "auth_path": auth["auth_path"],
+        "auth_method": auth["auth_method"],
+        "api_source": auth["api_source"],
+        "transport": "direct-api",
+        "used_models": [FABLE_MODEL],
+    }
+
+
+def review_plan(packet: str) -> dict[str, Any]:
+    if not isinstance(packet, str) or not packet.strip():
+        raise AdvisorError("`packet` must be a non-empty self-contained review packet.")
+    route = load_fable_route()
+    if route.get("transport", "claude-code") == "direct-api":
+        return _review_plan_direct_api(packet, route)
+    return _review_plan_claude_code(packet, route)
+
+
+def advisor_status(route: dict[str, str]) -> dict[str, Any]:
+    if route.get("transport", "claude-code") == "direct-api":
+        api_source = route.get("api_source")
+        if api_source not in API_SOURCES:
+            raise AdvisorError("Direct API transport requires an explicit API source.")
+        _, _, auth = direct_api_configuration(api_source)
+        return {
+            "available": True,
+            **route,
+            **auth,
+            "effort": "not-applied",
+            "configured_effort": route["effort"],
+        }
+    auth = check_claude_auth(
+        auth_mode=route["auth_mode"], api_source=route.get("api_source")
+    )
+    return {"available": True, **route, **auth}
 
 
 def tool_definitions() -> list[dict[str, Any]]:
@@ -519,7 +754,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "status",
             "title": "Check Claude Fable 5 advisor status",
-            "description": "Check the saved route and Claude Code login without a model call.",
+            "description": "Check the saved route and selected transport without a model call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -562,11 +797,7 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 result = _tool_result(review_plan(packet))
             elif name == "status":
                 route = load_fable_route()
-                auth = check_claude_auth(
-                    auth_mode=route["auth_mode"],
-                    api_source=route.get("api_source"),
-                )
-                result = _tool_result({"available": True, **route, **auth})
+                result = _tool_result(advisor_status(route))
             else:
                 raise AdvisorError(f"Unknown tool: {name!r}.")
         except AdvisorError as exc:

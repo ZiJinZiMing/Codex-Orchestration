@@ -135,7 +135,11 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("built-in cross-provider advisor exception", SKILL)
         self.assertIn("All bundled variants are disabled by default", SKILL)
         self.assertIn("first-party Pro or Max account", SKILL)
-        self.assertIn("never extracts a token", SKILL)
+        self.assertIn("--advisor-transport claude-code", SKILL)
+        self.assertIn("`direct-api` requires one static token or API key", SKILL)
+        self.assertIn("zero retries", SKILL)
+        self.assertIn("effort is reported as `configured_effort` but is not sent", SKILL)
+        self.assertIn("cannot prove that an upstream gateway did not remap", SKILL)
         self.assertIn(
             "runtime `modelUsage`, after deduplication, to be exactly",
             SKILL,

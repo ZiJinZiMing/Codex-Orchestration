@@ -26,7 +26,7 @@ Audit date: 2026-07-12. Baseline: `a674a81` (`0.4.0`).
 - Codex currently exposes no global engine field that hard-wires one executor model. The native path installs durable routing policy on the spawn tool; the root still decides whether to delegate and supplies the route.
 - Setup-time config parsing cannot prove a future signed-in task will accept a route or expose its effective child identity. A live release check is required.
 - Direct model overrides inherit the root provider. Cross-provider use requires a provider-pinned custom agent that the user configured and authenticated separately.
-- Claude Fable 5 is a narrow built-in exception: it uses the authenticated first-party Claude Code CLI through a read-only local MCP bridge and is available only as the root's plan advisor.
+- Claude Fable 5 is a narrow built-in exception available only as the root's plan advisor: its read-only local MCP bridge uses either the authenticated Claude Code CLI or one explicit direct Messages API request, with no transport fallback.
 - "Any model" means a model reachable through Codex's current provider, an already configured compatible custom provider, or a deliberately bundled bridge. The plugin does not create accounts, credentials, or protocol compatibility.
 - Custom-agent updates and removal remain fail-closed on Windows because the implementation cannot preserve the same inode/metadata guarantees there. Native App Server policy setup is a separate path.
 - The two cross-provider storage systems cannot be committed atomically by the current public interfaces. Status and bounded managed-role cleanup provide recovery without deleting edited or user-owned files.

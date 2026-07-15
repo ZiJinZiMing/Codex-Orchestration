@@ -1040,6 +1040,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("fable-advisor-py", servers)
         self.assertEqual(state["advisor"]["kind"], "fable")
         self.assertEqual(state["advisor"]["model"], "claude-fable-5")
+        self.assertEqual(state["advisor"]["transport"], "claude-code")
         self.assertIn("mcp", state["previous"])
 
         status = self.run_script("--status")
@@ -1059,6 +1060,115 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.run_script("--disable", "--apply")
         self.assertEqual(self.read_fake_config(), initial)
+
+    def test_fable_direct_api_setup_and_status_do_not_require_claude(self) -> None:
+        settings = self.root / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "configured",
+                        "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.claude.unlink()
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "high",
+            "--advisor-auth-mode",
+            "api",
+            "--advisor-api-source",
+            "user-settings",
+            "--advisor-transport",
+            "direct-api",
+            "--apply",
+        )
+        self.assertIn("transport direct-api", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["advisor"]["transport"], "direct-api")
+        self.assertEqual(state["advisor"]["auth_mode"], "api")
+        self.assertEqual(state["advisor"]["api_source"], "user-settings")
+
+        status = self.run_script("--status", "--require-effective")
+        self.assertIn("transport direct-api", status.stdout)
+        self.assertIn("no model call made", status.stdout)
+
+    def test_fable_transport_argument_and_state_validation(self) -> None:
+        invalid_commands = [
+            (
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--advisor-transport",
+                "direct-api",
+            ),
+            (
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--advisor-fable",
+                "--advisor-transport",
+                "direct-api",
+            ),
+            (
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--advisor-fable",
+                "--advisor-auth-mode",
+                "subscription",
+                "--advisor-transport",
+                "direct-api",
+            ),
+        ]
+        for command in invalid_commands:
+            with self.subTest(command=command):
+                result = self.run_script(*command, check=False)
+                self.assertEqual(result.returncode, 2)
+
+        state_path = self.home / NATIVE.STATE_FILENAME
+        valid_state = {
+            "schema": NATIVE.STATE_SCHEMA,
+            "config_file": str(self.home / "config.toml"),
+            "managed": {
+                "mode": "managed",
+                "usage": "managed",
+                "metadata": False,
+                "namespace": NATIVE.ROUTING_TOOL_NAMESPACE,
+                "enabled": True,
+            },
+            "executor": {
+                "kind": "model",
+                "model": "gpt-5.6-luna",
+                "effort": "high",
+            },
+            "advisor": {
+                "kind": "fable",
+                "model": "claude-fable-5",
+                "effort": "high",
+                "server": "fable-advisor-python",
+                "auth_mode": "subscription",
+                "transport": "direct-api",
+            },
+            "previous": {
+                "mode": {"present": False},
+                "usage": {"present": False},
+                "metadata": {"present": False},
+                "namespace": {"present": False},
+                "enabled": {"present": False},
+            },
+        }
+        state_path.write_text(json.dumps(valid_state), encoding="utf-8")
+        with self.assertRaises(NATIVE.ConfigurationError):
+            NATIVE._read_state(state_path)
 
     def test_missing_or_project_shadowed_custom_agent_is_refused(self) -> None:
         missing = self.run_script(

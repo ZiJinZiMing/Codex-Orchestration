@@ -42,6 +42,7 @@ FABLE_MODEL = "claude-fable-5"
 FABLE_EFFORTS = {"low", "medium", "high", "max"}
 FABLE_AUTH_MODES = {"subscription", "api", "auto"}
 FABLE_API_SOURCES = {"environment", "user-settings"}
+FABLE_TRANSPORTS = {"claude-code", "direct-api"}
 FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
     "fable-advisor-python": ("python", []),
@@ -102,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     advisor.add_argument(
         "--advisor-fable",
         action="store_true",
-        help="Use the bundled Claude Fable 5 advisor through Claude Code.",
+        help="Use the bundled Claude Fable 5 advisor.",
     )
     parser.add_argument(
         "--advisor-effort",
@@ -121,6 +122,11 @@ def parse_args() -> argparse.Namespace:
         "--advisor-api-source",
         choices=sorted(FABLE_API_SOURCES),
         help="With Fable api mode, use credentials from environment or user-settings.",
+    )
+    parser.add_argument(
+        "--advisor-transport",
+        choices=sorted(FABLE_TRANSPORTS),
+        help="Fable transport: claude-code (default) or direct-api.",
     )
 
     parser.add_argument("--codex-bin", default="codex")
@@ -168,6 +174,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_fable,
             args.advisor_auth_mode,
             args.advisor_api_source,
+            args.advisor_transport,
         )
     ):
         raise ConfigurationError("--status does not accept seat settings.")
@@ -180,6 +187,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_fable,
             args.advisor_auth_mode,
             args.advisor_api_source,
+            args.advisor_transport,
         )
     ):
         raise ConfigurationError("--disable does not accept seat settings.")
@@ -205,6 +213,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "--advisor-api-source requires --advisor-fable."
         )
+    if args.advisor_transport is not None and not args.advisor_fable:
+        raise ConfigurationError("--advisor-transport requires --advisor-fable.")
     if args.advisor_auth_mode == "api" and args.advisor_api_source is None:
         raise ConfigurationError(
             "Fable api mode requires --advisor-api-source environment or user-settings."
@@ -212,6 +222,10 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.advisor_api_source is not None and args.advisor_auth_mode != "api":
         raise ConfigurationError(
             "--advisor-api-source is valid only with --advisor-auth-mode api."
+        )
+    if args.advisor_transport == "direct-api" and args.advisor_auth_mode != "api":
+        raise ConfigurationError(
+            "Fable direct-api transport requires --advisor-auth-mode api."
         )
     if args.advisor_fable:
         effort = "max" if args.advisor_effort == "auto" else args.advisor_effort
@@ -611,6 +625,11 @@ def _read_state(path: Path) -> dict[str, Any] | None:
             and route.get("effort") in FABLE_EFFORTS
             and route.get("server") in FABLE_SERVERS
             and route.get("auth_mode", "subscription") in FABLE_AUTH_MODES
+            and route.get("transport", "claude-code") in FABLE_TRANSPORTS
+            and not (
+                route.get("transport", "claude-code") == "direct-api"
+                and route.get("auth_mode", "subscription") != "api"
+            )
             and (
                 (
                     route.get("auth_mode", "subscription") == "api"
@@ -881,17 +900,32 @@ def select_fable_server() -> str:
 
 
 def verify_fable_prerequisites(
-    auth_mode: str, api_source: str | None = None
+    auth_mode: str,
+    api_source: str | None = None,
+    transport: str = "claude-code",
 ) -> dict[str, Any]:
     try:
         from fable_advisor_mcp import (
             AdvisorError,
             check_claude_auth,
+            direct_api_configuration,
             environment_for_auth_path,
             resolve_claude,
         )
     except ImportError as exc:  # pragma: no cover - corrupt package
         raise ConfigurationError("The bundled Claude Fable 5 bridge is missing.") from exc
+    if transport == "direct-api":
+        if auth_mode != "api" or api_source is None:
+            raise ConfigurationError(
+                "Fable direct-api transport requires api authentication and a source."
+            )
+        try:
+            _, _, auth = direct_api_configuration(api_source)
+        except AdvisorError as exc:
+            raise ConfigurationError(str(exc)) from exc
+        return {"transport": transport, **auth}
+    if transport != "claude-code":
+        raise ConfigurationError(f"Unsupported Fable transport: {transport!r}.")
     try:
         claude = resolve_claude()
         auth = check_claude_auth(claude, auth_mode, api_source)
@@ -920,7 +954,7 @@ def verify_fable_prerequisites(
         raise ConfigurationError(
             f"Claude Code is too old for the Fable advisor bridge ({detail}); update it."
         )
-    return {"claude": str(claude), **auth}
+    return {"claude": str(claude), "transport": transport, **auth}
 
 
 def _route_summary(route: dict[str, Any]) -> str:
@@ -930,7 +964,9 @@ def _route_summary(route: dict[str, Any]) -> str:
         effort = "Extra High" if route["effort"] == "max" else route["effort"]
         mode = route.get("auth_mode", "subscription")
         source = f", {route['api_source']}" if mode == "api" else ""
-        return f"Claude Fable 5 {effort} ({mode}{source})"
+        transport = route.get("transport", "claude-code")
+        effort_label = "effort not applied" if transport == "direct-api" else effort
+        return f"Claude Fable 5 {effort_label} ({transport}, {mode}{source})"
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1258,6 +1294,7 @@ def _status(
                     fable_auth = verify_fable_prerequisites(
                         advisor.get("auth_mode", "subscription"),
                         advisor.get("api_source"),
+                        advisor.get("transport", "claude-code"),
                     )
                 except ConfigurationError as exc:
                     fable_available = False
@@ -1265,7 +1302,8 @@ def _status(
                 else:
                     print(
                         "Claude Fable 5: ready — configured mode "
-                        f"{fable_auth['auth_mode']}, active path {fable_auth['auth_path']}; "
+                        f"{fable_auth['auth_mode']}, active path {fable_auth['auth_path']}, "
+                        f"transport {fable_auth['transport']}; "
                         "no model call made"
                     )
             try:
@@ -1881,8 +1919,11 @@ def main() -> int:
             elif args.advisor_fable:
                 server = select_fable_server()
                 advisor_auth_mode = args.advisor_auth_mode or "auto"
+                advisor_transport = args.advisor_transport or "claude-code"
                 fable_auth = verify_fable_prerequisites(
-                    advisor_auth_mode, args.advisor_api_source
+                    advisor_auth_mode,
+                    args.advisor_api_source,
+                    advisor_transport,
                 )
                 advisor = {
                     "kind": "fable",
@@ -1892,6 +1933,7 @@ def main() -> int:
                     ),
                     "server": server,
                     "auth_mode": advisor_auth_mode,
+                    "transport": advisor_transport,
                 }
                 if args.advisor_api_source is not None:
                     advisor["api_source"] = args.advisor_api_source
@@ -1920,7 +1962,8 @@ def main() -> int:
             if fable_auth is not None:
                 print(
                     "Claude Fable 5 authentication: ready — configured mode "
-                    f"{fable_auth['auth_mode']}, active path {fable_auth['auth_path']}; "
+                    f"{fable_auth['auth_mode']}, active path {fable_auth['auth_path']}, "
+                    f"transport {fable_auth['transport']}; "
                     "setup makes no model call"
                 )
             if verified_agents:

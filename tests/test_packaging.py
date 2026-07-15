@@ -132,6 +132,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("never creates credentials or bypasses permissions", readme)
         self.assertIn("Codex decides when delegation or parallel work is useful", readme)
         self.assertIn("Fable 5 is a root-facing plan advisor, not a second orchestrator", readme)
+        self.assertIn("`direct-api` sends one dependency-free Python Messages API request", readme)
+        self.assertIn("Transports never fall back to each other", readme)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', native)
 
     def test_ascii_and_role_copy_are_plain_and_root_centered(self) -> None:

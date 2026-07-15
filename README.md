@@ -81,7 +81,24 @@ This creates the default workflow:
 Selected Codex model -> Fable 5 review -> selected model decides -> Luna executes -> selected model verifies
 ```
 
-Fable 5 uses the official Claude Code CLI. Setup supports an explicit subscription login or an Anthropic-compatible API/Gateway credential from either the process environment or Claude Code user settings. With the API/Gateway route, you do not need to add an Anthropic API key to Codex. `auto` never silently selects an API route: when API configuration exists, setup requires the explicit mode and source. Credentials remain in their existing location and are never copied into Codex routing state.
+Fable 5 supports two explicit transports. `claude-code` uses the official Claude Code CLI with either a subscription login or API/Gateway credentials. `direct-api` sends one dependency-free Python Messages API request and requires `--advisor-auth-mode api --advisor-api-source environment|user-settings`; it does not require Claude Code or a Claude subscription. Transports never fall back to each other. With either API route, you do not need to add an Anthropic API key to Codex: credentials stay in their selected environment or Claude Code user-settings source and are never copied into routing state. Direct API applies no Claude Code effort setting, follows no redirects, performs no retries, and accepts only the byte-exact response model IDs `claude-fable-5` and `anthropic/claude-fable-5`; both normalize to the canonical Fable-only metadata while preserving the raw echo.
+
+For a CC Switch + OpenRouter setup, configure the provider with Anthropic Messages format and map Fable to `anthropic/claude-fable-5`. Let CC Switch maintain `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` in Claude Code user settings; the local Base URL may be its loopback proxy such as `http://127.0.0.1:15721`. Then apply the direct route:
+
+```bash
+python3 <skill-dir>/scripts/configure_native_routing.py \
+  --codex-bin <active-codex-binary> \
+  --executor-model gpt-5.6-luna \
+  --executor-effort xhigh \
+  --advisor-fable \
+  --advisor-effort high \
+  --advisor-auth-mode api \
+  --advisor-api-source user-settings \
+  --advisor-transport direct-api \
+  --apply
+```
+
+The routing state stores only the non-secret source and transport enums. Never paste a provider key into a prompt, repository file, or routing state.
 
 After setup, start another new task and work normally.
 
