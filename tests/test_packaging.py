@@ -40,10 +40,13 @@ class PackagingTests(unittest.TestCase):
     def test_native_and_custom_configurators_are_packaged(self) -> None:
         native = SKILL_ROOT / "scripts" / "configure_native_routing.py"
         custom = SKILL_ROOT / "scripts" / "configure_orchestration.py"
+        fable_api = SKILL_ROOT / "scripts" / "configure_fable_api.py"
         self.assertTrue(native.is_file())
         self.assertTrue(custom.is_file())
+        self.assertTrue(fable_api.is_file())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
+        self.assertIn("credential-stdin", fable_api.read_text(encoding="utf-8"))
 
     def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
         mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
@@ -61,6 +64,10 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(server["cwd"], ".")
             self.assertIn("fable_advisor_mcp.py", server["args"][-1])
         self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
+        self.assertIn(
+            ".codex-orchestration-fable-api.json",
+            (REPO_ROOT / ".gitignore").read_text(encoding="utf-8"),
+        )
 
     def test_explicit_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -132,8 +139,12 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("never creates credentials or bypasses permissions", readme)
         self.assertIn("Codex decides when delegation or parallel work is useful", readme)
         self.assertIn("Fable 5 is a root-facing plan advisor, not a second orchestrator", readme)
-        self.assertIn("`direct-api` sends one dependency-free Python Messages API request", readme)
-        self.assertIn("Transports never fall back to each other", readme)
+        self.assertIn("Claude Fable 5 has three explicit advisor paths", readme)
+        self.assertIn("configure_fable_api.py --init-default", readme)
+        self.assertIn('"api_key": ""', readme)
+        self.assertIn("--advisor-api-source config-file", readme)
+        self.assertIn("configure_fable_api.py", readme)
+        self.assertIn("paths never fall back to each other", readme)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', native)
 
     def test_ascii_and_role_copy_are_plain_and_root_centered(self) -> None:
@@ -171,7 +182,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertIn("Other models must already be available through Codex", readme)
         self.assertIn("an authenticated, compatible provider", readme)
-        self.assertIn("do not need to add an Anthropic API key to Codex", readme)
+        self.assertIn("never copied into routing state or tool output", readme)
         self.assertIn("`.codex/agents/`", readme)
         self.assertIn("`~/.codex/agents/`", readme)
 

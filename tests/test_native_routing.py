@@ -1041,10 +1041,13 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(state["advisor"]["kind"], "fable")
         self.assertEqual(state["advisor"]["model"], "claude-fable-5")
         self.assertEqual(state["advisor"]["transport"], "claude-code")
+        self.assertEqual(state["advisor"]["path"], "claude-code-cli")
+        self.assertIn("Advisor path: Claude Code CLI", setup.stdout)
         self.assertIn("mcp", state["previous"])
 
         status = self.run_script("--status")
         self.assertIn("Claude Fable 5: ready", status.stdout)
+        self.assertIn("Advisor path: Claude Code CLI", status.stdout)
         self.assertIn("no model call made", status.stdout)
 
         update = self.run_script(
@@ -1099,10 +1102,131 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(state["advisor"]["transport"], "direct-api")
         self.assertEqual(state["advisor"]["auth_mode"], "api")
         self.assertEqual(state["advisor"]["api_source"], "user-settings")
+        self.assertEqual(state["advisor"]["path"], "ccswitch")
+        self.assertIn("Advisor path: CCSwitch", setup.stdout)
 
         status = self.run_script("--status", "--require-effective")
         self.assertIn("transport direct-api", status.stdout)
+        self.assertIn("Advisor path: CCSwitch", status.stdout)
         self.assertIn("no model call made", status.stdout)
+
+    def test_fable_standalone_config_file_setup_ignores_other_api_sources(self) -> None:
+        (self.home / ".codex-orchestration-fable-api.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "api_url": "https://openrouter.ai/api/v1/messages",
+                    "model": "anthropic/claude-fable-5",
+                    "auth_type": "bearer",
+                    "credential": "standalone-secret",
+                }
+            ),
+            encoding="utf-8",
+        )
+        settings = self.root / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "poison-settings",
+                        "ANTHROPIC_BASE_URL": "https://poison.invalid",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.claude.unlink()
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "high",
+            "--advisor-auth-mode",
+            "api",
+            "--advisor-api-source",
+            "config-file",
+            "--advisor-transport",
+            "direct-api",
+            "--apply",
+        )
+        self.assertIn("transport direct-api", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["advisor"]["api_source"], "config-file")
+        self.assertEqual(state["advisor"]["transport"], "direct-api")
+        self.assertEqual(state["advisor"]["path"], "python-api")
+        self.assertIn("Advisor path: Python API", setup.stdout)
+        self.assertNotIn("standalone-secret", json.dumps(state))
+
+        status = self.run_script("--status", "--require-effective")
+        self.assertIn("direct-api, api, config-file", status.stdout)
+        self.assertIn("Advisor path: Python API", status.stdout)
+        self.assertNotIn("standalone-secret", status.stdout)
+
+    def test_fable_config_file_setup_requires_initialized_file_and_direct_transport(
+        self,
+    ) -> None:
+        missing = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--advisor-auth-mode",
+            "api",
+            "--advisor-api-source",
+            "config-file",
+            "--advisor-transport",
+            "direct-api",
+            check=False,
+        )
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("configure_fable_api.py", missing.stderr)
+
+        (self.home / ".codex-orchestration-fable-api.json").write_text(
+            json.dumps(
+                {
+                    "schema": 2,
+                    "provider": {
+                        "api_url": "https://openrouter.ai/api/v1/messages",
+                        "api_key": "",
+                        "model": "anthropic/claude-fable-5",
+                        "auth_type": "bearer",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        disabled = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--advisor-auth-mode",
+            "api",
+            "--advisor-api-source",
+            "config-file",
+            "--advisor-transport",
+            "direct-api",
+            check=False,
+        )
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("api_key is empty", disabled.stderr)
+
+        wrong_transport = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--advisor-auth-mode",
+            "api",
+            "--advisor-api-source",
+            "config-file",
+            check=False,
+        )
+        self.assertEqual(wrong_transport.returncode, 2)
+        self.assertIn("requires --advisor-transport direct-api", wrong_transport.stderr)
 
     def test_fable_transport_argument_and_state_validation(self) -> None:
         invalid_commands = [
@@ -1166,6 +1290,18 @@ class NativeRoutingTests(unittest.TestCase):
                 "enabled": {"present": False},
             },
         }
+        state_path.write_text(json.dumps(valid_state), encoding="utf-8")
+        with self.assertRaises(NATIVE.ConfigurationError):
+            NATIVE._read_state(state_path)
+
+        valid_state["advisor"].update(
+            {
+                "auth_mode": "api",
+                "api_source": "config-file",
+                "transport": "direct-api",
+                "path": "ccswitch",
+            }
+        )
         state_path.write_text(json.dumps(valid_state), encoding="utf-8")
         with self.assertRaises(NATIVE.ConfigurationError):
             NATIVE._read_state(state_path)

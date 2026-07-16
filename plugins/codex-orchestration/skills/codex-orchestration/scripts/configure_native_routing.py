@@ -41,8 +41,14 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 FABLE_MODEL = "claude-fable-5"
 FABLE_EFFORTS = {"low", "medium", "high", "max"}
 FABLE_AUTH_MODES = {"subscription", "api", "auto"}
-FABLE_API_SOURCES = {"environment", "user-settings"}
+FABLE_API_SOURCES = {"config-file", "environment", "user-settings"}
 FABLE_TRANSPORTS = {"claude-code", "direct-api"}
+FABLE_ADVISOR_PATHS = {"claude-code-cli", "ccswitch", "python-api"}
+FABLE_ADVISOR_PATH_DISPLAY = {
+    "claude-code-cli": "Claude Code CLI",
+    "ccswitch": "CCSwitch",
+    "python-api": "Python API",
+}
 FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
     "fable-advisor-python": ("python", []),
@@ -64,6 +70,16 @@ MISSING = object()
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+def fable_advisor_path(transport: str, api_source: str | None) -> str:
+    if transport == "claude-code":
+        return "claude-code-cli"
+    if transport == "direct-api" and api_source == "user-settings":
+        return "ccswitch"
+    if transport == "direct-api" and api_source in {"config-file", "environment"}:
+        return "python-api"
+    raise ConfigurationError("Invalid Claude Fable 5 advisor path.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -121,7 +137,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--advisor-api-source",
         choices=sorted(FABLE_API_SOURCES),
-        help="With Fable api mode, use credentials from environment or user-settings.",
+        help=(
+            "With Fable api mode, use the standalone config-file, environment, "
+            "or user-settings source."
+        ),
     )
     parser.add_argument(
         "--advisor-transport",
@@ -217,7 +236,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("--advisor-transport requires --advisor-fable.")
     if args.advisor_auth_mode == "api" and args.advisor_api_source is None:
         raise ConfigurationError(
-            "Fable api mode requires --advisor-api-source environment or user-settings."
+            "Fable api mode requires --advisor-api-source config-file, environment, "
+            "or user-settings."
         )
     if args.advisor_api_source is not None and args.advisor_auth_mode != "api":
         raise ConfigurationError(
@@ -226,6 +246,13 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.advisor_transport == "direct-api" and args.advisor_auth_mode != "api":
         raise ConfigurationError(
             "Fable direct-api transport requires --advisor-auth-mode api."
+        )
+    if (
+        args.advisor_api_source == "config-file"
+        and args.advisor_transport != "direct-api"
+    ):
+        raise ConfigurationError(
+            "Fable config-file source requires --advisor-transport direct-api."
         )
     if args.advisor_fable:
         effort = "max" if args.advisor_effort == "auto" else args.advisor_effort
@@ -630,6 +657,10 @@ def _read_state(path: Path) -> dict[str, Any] | None:
                 route.get("transport", "claude-code") == "direct-api"
                 and route.get("auth_mode", "subscription") != "api"
             )
+            and not (
+                route.get("api_source") == "config-file"
+                and route.get("transport", "claude-code") != "direct-api"
+            )
             and (
                 (
                     route.get("auth_mode", "subscription") == "api"
@@ -641,6 +672,16 @@ def _read_state(path: Path) -> dict[str, Any] | None:
                 )
             )
         )
+        if valid and label == "advisor" and kind == "fable":
+            try:
+                expected_path = fable_advisor_path(
+                    route.get("transport", "claude-code"), route.get("api_source")
+                )
+            except ConfigurationError:
+                valid = False
+            else:
+                saved_path = route.get("path")
+                valid = saved_path is None or saved_path == expected_path
         if not valid:
             raise ConfigurationError(f"Routing state has an invalid {label} route: {path}")
     previous = state.get("previous")
@@ -903,6 +944,7 @@ def verify_fable_prerequisites(
     auth_mode: str,
     api_source: str | None = None,
     transport: str = "claude-code",
+    codex_home: Path | None = None,
 ) -> dict[str, Any]:
     try:
         from fable_advisor_mcp import (
@@ -920,7 +962,8 @@ def verify_fable_prerequisites(
                 "Fable direct-api transport requires api authentication and a source."
             )
         try:
-            _, _, auth = direct_api_configuration(api_source)
+            config_home = codex_home if api_source == "config-file" else None
+            _, _, auth = direct_api_configuration(api_source, config_home)
         except AdvisorError as exc:
             raise ConfigurationError(str(exc)) from exc
         return {"transport": transport, **auth}
@@ -965,8 +1008,14 @@ def _route_summary(route: dict[str, Any]) -> str:
         mode = route.get("auth_mode", "subscription")
         source = f", {route['api_source']}" if mode == "api" else ""
         transport = route.get("transport", "claude-code")
+        path = route.get("path") or fable_advisor_path(
+            transport, route.get("api_source")
+        )
         effort_label = "effort not applied" if transport == "direct-api" else effort
-        return f"Claude Fable 5 {effort_label} ({transport}, {mode}{source})"
+        return (
+            f"Claude Fable 5 {effort_label} "
+            f"({FABLE_ADVISOR_PATH_DISPLAY[path]}; {transport}, {mode}{source})"
+        )
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1290,11 +1339,17 @@ def _status(
             advisor = state.get("advisor")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
             if isinstance(advisor, dict) and advisor.get("kind") == "fable":
+                path = advisor.get("path") or fable_advisor_path(
+                    advisor.get("transport", "claude-code"),
+                    advisor.get("api_source"),
+                )
+                print(f"Advisor path: {FABLE_ADVISOR_PATH_DISPLAY[path]}")
                 try:
                     fable_auth = verify_fable_prerequisites(
                         advisor.get("auth_mode", "subscription"),
                         advisor.get("api_source"),
                         advisor.get("transport", "claude-code"),
+                        app.codex_home,
                     )
                 except ConfigurationError as exc:
                     fable_available = False
@@ -1924,6 +1979,7 @@ def main() -> int:
                     advisor_auth_mode,
                     args.advisor_api_source,
                     advisor_transport,
+                    app.codex_home,
                 )
                 advisor = {
                     "kind": "fable",
@@ -1934,6 +1990,9 @@ def main() -> int:
                     "server": server,
                     "auth_mode": advisor_auth_mode,
                     "transport": advisor_transport,
+                    "path": fable_advisor_path(
+                        advisor_transport, args.advisor_api_source
+                    ),
                 }
                 if args.advisor_api_source is not None:
                     advisor["api_source"] = args.advisor_api_source
@@ -1959,6 +2018,11 @@ def main() -> int:
             print("Orchestrator: model selected when each Codex task starts")
             print(f"Executor: {_route_summary(executor)}")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
+            if isinstance(advisor, dict) and advisor.get("kind") == "fable":
+                print(
+                    "Advisor path: "
+                    + FABLE_ADVISOR_PATH_DISPLAY[advisor["path"]]
+                )
             if fable_auth is not None:
                 print(
                     "Claude Fable 5 authentication: ready — configured mode "

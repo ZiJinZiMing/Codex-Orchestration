@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.5.0+codex.20260715140726",
+  "version": "0.5.0+codex.20260716103423",
   "description": "Bring compatible models into Codex, assign roles, and run them as one guided workflow.",
   "author": {
     "name": "CJ Zafir",

@@ -81,9 +81,62 @@ This creates the default workflow:
 Selected Codex model -> Fable 5 review -> selected model decides -> Luna executes -> selected model verifies
 ```
 
-Fable 5 supports two explicit transports. `claude-code` uses the official Claude Code CLI with either a subscription login or API/Gateway credentials. `direct-api` sends one dependency-free Python Messages API request and requires `--advisor-auth-mode api --advisor-api-source environment|user-settings`; it does not require Claude Code or a Claude subscription. Transports never fall back to each other. With either API route, you do not need to add an Anthropic API key to Codex: credentials stay in their selected environment or Claude Code user-settings source and are never copied into routing state. Direct API uses a 65,536-token output cap and a 600-second request timeout, applies no Claude Code effort setting, follows no redirects, performs no retries, and accepts only the byte-exact response model IDs `claude-fable-5` and `anthropic/claude-fable-5`; both normalize to the canonical Fable-only metadata while preserving the raw echo.
+Claude Fable 5 has three explicit advisor paths. The selected path is saved in routing state and printed by setup and status; paths never fall back to each other.
 
-For a CC Switch + OpenRouter setup, configure the provider with Anthropic Messages format and map Fable to `anthropic/claude-fable-5`. Let CC Switch maintain `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` in Claude Code user settings; the local Base URL may be its loopback proxy such as `http://127.0.0.1:15721`. Then apply the direct route:
+| Advisor path | Internal route | Configuration source |
+| --- | --- | --- |
+| Claude Code CLI | `claude-code` | Claude Code login or explicitly selected CLI API authentication |
+| CCSwitch | `direct-api` + `user-settings` | CCSwitch-managed Claude user settings and loopback proxy |
+| Python API | `direct-api` + `config-file` | Plugin-owned provider configuration under `CODEX_HOME` |
+
+The older `direct-api` + `environment` source remains a compatibility form of the Python API path. It is used only when routing state explicitly selects `environment`; it never overrides or rescues a selected config-file path.
+
+For a standalone Python API route, create the disabled default provider file first:
+
+```bash
+python3 <skill-dir>/scripts/configure_fable_api.py --init-default
+```
+
+It creates `CODEX_HOME/.codex-orchestration-fable-api.json` without overwriting an existing file:
+
+```json
+{
+  "schema": 2,
+  "provider": {
+    "api_url": "https://openrouter.ai/api/v1/messages",
+    "api_key": "",
+    "model": "anthropic/claude-fable-5",
+    "auth_type": "bearer"
+  }
+}
+```
+
+`api_url`, `api_key`, `model`, and `auth_type` are one provider configuration. The provider model is the exact outbound API model field and may be changed to another safe provider identifier; the orchestration identity remains Claude Fable 5. An empty `api_key` keeps the Python API path disabled and no request is made. Configure a key through the initializer's hidden prompt (never on the command line) or protect the file before editing it directly. Legacy schema-1 files remain strictly supported and are never rewritten automatically.
+
+To replace the disabled default through the hidden key prompt while keeping the documented defaults:
+
+```text
+python3 <skill-dir>/scripts/configure_fable_api.py --force --api-url https://openrouter.ai/api/v1/messages --model anthropic/claude-fable-5 --auth-type bearer
+```
+
+Then apply the route:
+
+```bash
+python3 <skill-dir>/scripts/configure_native_routing.py \
+  --codex-bin <active-codex-binary> \
+  --executor-model gpt-5.6-luna \
+  --executor-effort xhigh \
+  --advisor-fable \
+  --advisor-effort high \
+  --advisor-auth-mode api \
+  --advisor-api-source config-file \
+  --advisor-transport direct-api \
+  --apply
+```
+
+The standalone file may contain a metered credential after configuration, is never copied into routing state or tool output, and must not be committed or shared. The initializer writes it atomically and requests owner-only permissions where the operating system supports them; local administrators can still read a user-owned file, and Windows does not provide Unix `0600` semantics through Python alone.
+
+CC Switch remains an optional alternative. Configure its OpenRouter provider with Anthropic Messages format and map Fable to `anthropic/claude-fable-5`. Let it maintain `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` in Claude Code user settings; the local Base URL may be its loopback proxy such as `http://127.0.0.1:15721`. Then apply the same direct transport with `--advisor-api-source user-settings`.
 
 ```bash
 python3 <skill-dir>/scripts/configure_native_routing.py \
@@ -98,7 +151,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --apply
 ```
 
-The routing state stores only the non-secret source and transport enums. Never paste a provider key into a prompt, repository file, or routing state.
+Plugin installation itself has no secure interactive credential hook. Python API setup refuses to continue until the provider file exists and has a non-empty key. Runtime reloads and validates the selected source for every review; missing, disabled, or invalid configuration fails closed without consulting Claude settings, CCSwitch, environment variables, or another path.
 
 After setup, start another new task and work normally.
 

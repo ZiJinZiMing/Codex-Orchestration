@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only MCP bridge from Codex to Claude Fable 5 through Claude Code."""
+"""Read-only MCP bridge from Codex to Claude Fable 5."""
 
 from __future__ import annotations
 
@@ -15,16 +15,32 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from configure_fable_api import (  # noqa: E402
+    FableApiConfigError,
+    load_config as load_fable_api_config,
+)
+
+
 STATE_FILENAME = ".codex-orchestration-routing.json"
 FABLE_MODEL = "claude-fable-5"
 ALLOWED_MODELS = frozenset({FABLE_MODEL})
 ALLOWED_DIRECT_RESPONSE_MODELS = frozenset(
     {FABLE_MODEL, f"anthropic/{FABLE_MODEL}"}
 )
+ADVISOR_PATHS = {"claude-code-cli", "ccswitch", "python-api"}
+ADVISOR_PATH_DISPLAY = {
+    "claude-code-cli": "Claude Code CLI",
+    "ccswitch": "CCSwitch",
+    "python-api": "Python API",
+}
 REVIEW_SESSION_NAME = "codex-fable-review"
 SUPPORTED_EFFORTS = {"low", "medium", "high", "max"}
 AUTH_MODES = {"subscription", "api", "auto"}
-API_SOURCES = {"environment", "user-settings"}
+API_SOURCES = {"config-file", "environment", "user-settings"}
 TRANSPORTS = {"claude-code", "direct-api"}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
@@ -81,6 +97,16 @@ class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
         newurl: str,
     ) -> None:
         return None
+
+
+def advisor_path_for(transport: str, api_source: str | None) -> str:
+    if transport == "claude-code":
+        return "claude-code-cli"
+    if transport == "direct-api" and api_source == "user-settings":
+        return "ccswitch"
+    if transport == "direct-api" and api_source in {"config-file", "environment"}:
+        return "python-api"
+    raise AdvisorError("The saved Claude Fable 5 advisor path is invalid.")
 
 
 def codex_home() -> Path:
@@ -166,13 +192,35 @@ def api_invocation_for_source(
     raise AdvisorError(f"Unsupported Claude API source: {api_source!r}.")
 
 
+def _standalone_api_config(home: Path | None = None) -> dict[str, Any]:
+    try:
+        return load_fable_api_config(
+            codex_home=codex_home() if home is None else home
+        )
+    except FableApiConfigError as exc:
+        raise AdvisorError(str(exc)) from exc
+
+
 def check_api_auth(
     api_source: str | None, home: Path | None = None
 ) -> dict[str, str]:
     if api_source not in API_SOURCES:
         raise AdvisorError(
-            "Claude api mode requires an explicit API source: environment or user-settings."
+            "Claude api mode requires an explicit API source: config-file, environment, "
+            "or user-settings."
         )
+    if api_source == "config-file":
+        config = _standalone_api_config(home)
+        if not config["enabled"]:
+            raise AdvisorError(
+                "Python API path is disabled because the provider api_key is empty."
+            )
+        return {
+            "auth_mode": "api",
+            "auth_path": "api",
+            "auth_method": "api",
+            "api_source": api_source,
+        }
     api_sources = set(api_credential_sources(home))
     if api_source not in api_sources:
         raise AdvisorError(
@@ -225,6 +273,29 @@ def _direct_api_endpoint(base_url: str) -> str:
 def direct_api_configuration(
     api_source: str, home: Path | None = None
 ) -> tuple[dict[str, str], str, dict[str, str]]:
+    if api_source == "config-file":
+        config = _standalone_api_config(home)
+        if not config["enabled"]:
+            raise AdvisorError(
+                "Python API path is disabled because the provider api_key is empty."
+            )
+        provider = config["provider"]
+        auth = {
+            "auth_mode": "api",
+            "auth_path": "api",
+            "auth_method": "api",
+            "api_source": api_source,
+            "advisor_path": "python-api",
+            "request_model": provider["model"],
+        }
+        if provider["auth_type"] == "bearer":
+            credential_header = {
+                "Authorization": f"Bearer {provider['api_key']}"
+            }
+        else:
+            credential_header = {"x-api-key": provider["api_key"]}
+        return credential_header, provider["api_url"], auth
+
     auth = check_api_auth(api_source, home)
     api_env, api_key_helper = api_invocation_for_source(api_source, home)
     if api_key_helper:
@@ -244,6 +315,8 @@ def direct_api_configuration(
     endpoint = _direct_api_endpoint(
         api_env.get("ANTHROPIC_BASE_URL", DEFAULT_ANTHROPIC_BASE_URL)
     )
+    auth["request_model"] = FABLE_MODEL
+    auth["advisor_path"] = advisor_path_for("direct-api", api_source)
     return credential_header, endpoint, auth
 
 
@@ -455,6 +528,7 @@ def load_fable_route(home: Path | None = None) -> dict[str, str]:
     auth_mode = route.get("auth_mode", "subscription")
     api_source = route.get("api_source")
     transport = route.get("transport", "claude-code")
+    saved_path = route.get("path")
     if model != FABLE_MODEL or effort not in SUPPORTED_EFFORTS:
         raise AdvisorError("The saved Claude Fable 5 route is invalid.")
     if auth_mode not in AUTH_MODES:
@@ -467,11 +541,17 @@ def load_fable_route(home: Path | None = None) -> dict[str, str]:
         raise AdvisorError("The saved Claude Fable 5 transport is invalid.")
     if transport == "direct-api" and auth_mode != "api":
         raise AdvisorError("Direct API transport requires Claude api authentication mode.")
+    if api_source == "config-file" and transport != "direct-api":
+        raise AdvisorError("The config-file API source requires direct-api transport.")
+    advisor_path = advisor_path_for(transport, api_source)
+    if saved_path is not None and saved_path != advisor_path:
+        raise AdvisorError("The saved Claude Fable 5 advisor path is inconsistent.")
     result = {
         "model": model,
         "effort": effort,
         "auth_mode": auth_mode,
         "transport": transport,
+        "path": advisor_path,
     }
     if api_source is not None:
         result["api_source"] = api_source
@@ -603,6 +683,7 @@ def _review_plan_claude_code(
         "auth_path": auth["auth_path"],
         "auth_method": auth["auth_method"],
         "transport": "claude-code",
+        "advisor_path": "claude-code-cli",
         "used_models": used_models,
     }
     if "api_source" in auth:
@@ -618,7 +699,7 @@ def _review_plan_direct_api(
         raise AdvisorError("Direct API transport requires an explicit API source.")
     credential_header, endpoint, auth = direct_api_configuration(api_source)
     body = {
-        "model": FABLE_MODEL,
+        "model": auth["request_model"],
         "max_tokens": DIRECT_API_MAX_TOKENS,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": packet}],
@@ -654,7 +735,13 @@ def _review_plan_direct_api(
     if not isinstance(payload, dict):
         raise AdvisorError("Direct API returned an unexpected JSON value.")
     response_model = payload.get("model")
-    if (
+    if api_source == "config-file":
+        if response_model != auth["request_model"]:
+            raise AdvisorError(
+                "Strict model verification failed: Python API requested model "
+                f"{auth['request_model']!r} but the provider echoed {response_model!r}."
+            )
+    elif (
         not isinstance(response_model, str)
         or response_model not in ALLOWED_DIRECT_RESPONSE_MODELS
     ):
@@ -681,6 +768,7 @@ def _review_plan_direct_api(
         "decision": first,
         "review": review,
         "model": FABLE_MODEL,
+        "request_model": auth["request_model"],
         "response_model": response_model,
         "model_echo_policy": "exact-allowlist-v1",
         "effort": "not-applied",
@@ -690,6 +778,7 @@ def _review_plan_direct_api(
         "auth_method": auth["auth_method"],
         "api_source": auth["api_source"],
         "transport": "direct-api",
+        "advisor_path": auth["advisor_path"],
         "used_models": [FABLE_MODEL],
     }
 
@@ -719,7 +808,12 @@ def advisor_status(route: dict[str, str]) -> dict[str, Any]:
     auth = check_claude_auth(
         auth_mode=route["auth_mode"], api_source=route.get("api_source")
     )
-    return {"available": True, **route, **auth}
+    return {
+        "available": True,
+        **route,
+        **auth,
+        "advisor_path": route.get("path", "claude-code-cli"),
+    }
 
 
 def tool_definitions() -> list[dict[str, Any]]:

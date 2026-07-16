@@ -13,7 +13,7 @@
    ```
 
 4. From a new Desktop task, verify one direct same-provider child route. Record `route accepted`; record `used and confirmed` only if the client exposes effective child model/provider/effort metadata.
-5. If Claude Fable 5 is included in the release, verify setup, status, one `review_plan` call, exact runtime model metadata, and disable/restore for every changed transport. Claude Code subscription verification requires a first-party login; direct API verification requires an explicit API source and must prove there was no CLI fallback.
+5. If Claude Fable 5 is included in the release, verify setup, status, one `review_plan` call, exact runtime model metadata, and disable/restore for every changed transport. Claude Code subscription verification requires a first-party login; direct API verification requires an explicit API source and must prove there was no CLI fallback. Standalone `config-file` verification must additionally poison or remove every API environment and Claude-settings input and prove the request URL/model/credential came only from the validated plugin-owned file.
 6. Merge only after every protected check passes.
 7. Create a signed annotated tag named `v<manifest-version>` at the reviewed merge commit.
 8. Re-run `python3 scripts/release_check.py --require-tag` and publish a GitHub release from that tag using the matching changelog section.

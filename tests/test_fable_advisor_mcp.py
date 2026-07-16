@@ -92,6 +92,50 @@ class FableAdvisorMcpTests(unittest.TestCase):
         settings.parent.mkdir(exist_ok=True)
         settings.write_text(json.dumps({"env": env}), encoding="utf-8")
 
+    def write_standalone_api_config(
+        self,
+        *,
+        credential: str = "standalone-secret",
+        api_url: str = "https://openrouter.ai/api/v1/messages",
+        model: str = "anthropic/claude-fable-5",
+        auth_type: str = "bearer",
+    ) -> None:
+        (self.home / ".codex-orchestration-fable-api.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "api_url": api_url,
+                    "model": model,
+                    "auth_type": auth_type,
+                    "credential": credential,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def write_python_api_provider(
+        self,
+        *,
+        api_key: str = "",
+        api_url: str = "https://openrouter.ai/api/v1/messages",
+        model: str = "anthropic/claude-fable-5",
+        auth_type: str = "bearer",
+    ) -> None:
+        (self.home / ".codex-orchestration-fable-api.json").write_text(
+            json.dumps(
+                {
+                    "schema": 2,
+                    "provider": {
+                        "api_url": api_url,
+                        "api_key": api_key,
+                        "model": model,
+                        "auth_type": auth_type,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_review_is_pinned_sanitized_read_only_and_runtime_confirmed(self) -> None:
         calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -319,6 +363,197 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertNotIn("effort", body)
         self.assertNotIn("output_config", body)
+
+    def test_config_file_direct_api_is_isolated_from_all_other_sources(self) -> None:
+        self.set_direct_route("config-file")
+        self.write_standalone_api_config()
+        self.write_user_api_settings(
+            ANTHROPIC_AUTH_TOKEN="poison-settings-token",
+            ANTHROPIC_BASE_URL="https://poison-settings.invalid",
+        )
+        poison_env = {
+            "CODEX_HOME": str(self.home),
+            "ANTHROPIC_API_KEY": "poison-env-key",
+            "ANTHROPIC_AUTH_TOKEN": "poison-env-token",
+            "ANTHROPIC_BASE_URL": "https://poison-env.invalid",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Poison: yes",
+            "CLAUDE_CODE_OAUTH_TOKEN": "poison-oauth",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "poison-refresh",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "CLAUDE_CODE_USE_FOUNDRY": "1",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "poison-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "poison-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "poison-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "poison-model",
+        }
+        opener = mock.Mock()
+        opener.open.return_value = FakeHttpResponse(
+            {
+                "model": "anthropic/claude-fable-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "PLAN_APPROVED"}],
+            }
+        )
+        with (
+            mock.patch.dict(os.environ, poison_env, clear=True),
+            mock.patch.object(FABLE.urllib_request, "build_opener", return_value=opener),
+            mock.patch.object(
+                FABLE,
+                "user_settings_api_invocation",
+                side_effect=AssertionError("config-file read user settings"),
+            ) as user_settings,
+            mock.patch.object(FABLE, "resolve_claude") as resolve_claude,
+            mock.patch.object(FABLE.subprocess, "run") as run,
+        ):
+            result = FABLE.review_plan("standalone packet")
+
+        self.assertEqual(result["decision"], "PLAN_APPROVED")
+        self.assertEqual(result["api_source"], "config-file")
+        self.assertEqual(result["request_model"], "anthropic/claude-fable-5")
+        self.assertEqual(result["response_model"], "anthropic/claude-fable-5")
+        self.assertEqual(result["model"], "claude-fable-5")
+        self.assertEqual(result["used_models"], ["claude-fable-5"])
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/messages")
+        self.assertEqual(json.loads(request.data)["model"], "anthropic/claude-fable-5")
+        headers = {name.lower(): value for name, value in request.header_items()}
+        self.assertEqual(headers["authorization"], "Bearer standalone-secret")
+        self.assertNotIn("poison", json.dumps(result))
+        user_settings.assert_not_called()
+        resolve_claude.assert_not_called()
+        run.assert_not_called()
+        opener.open.assert_called_once()
+
+    def test_python_api_provider_model_is_mapped_but_advisor_remains_fable(self) -> None:
+        self.set_direct_route("config-file")
+        self.write_python_api_provider(api_key="provider-secret", model="x-ai/grok-4.5")
+        opener = mock.Mock()
+        opener.open.return_value = FakeHttpResponse(
+            {
+                "model": "x-ai/grok-4.5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "PLAN_APPROVED"}],
+            }
+        )
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_HOME": str(self.home),
+                    "ANTHROPIC_AUTH_TOKEN": "ignored-environment-secret",
+                },
+                clear=True,
+            ),
+            mock.patch.object(FABLE.urllib_request, "build_opener", return_value=opener),
+        ):
+            result = FABLE.review_plan("provider packet")
+
+        request = opener.open.call_args.args[0]
+        self.assertEqual(json.loads(request.data)["model"], "x-ai/grok-4.5")
+        self.assertEqual(result["request_model"], "x-ai/grok-4.5")
+        self.assertEqual(result["response_model"], "x-ai/grok-4.5")
+        self.assertEqual(result["model"], "claude-fable-5")
+        self.assertEqual(result["used_models"], ["claude-fable-5"])
+        self.assertEqual(result["advisor_path"], "python-api")
+
+    def test_blank_python_api_key_disables_without_environment_fallback(self) -> None:
+        self.set_direct_route("config-file")
+        self.write_python_api_provider(api_key="")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_HOME": str(self.home),
+                    "ANTHROPIC_AUTH_TOKEN": "must-not-fallback",
+                },
+                clear=True,
+            ),
+            mock.patch.object(FABLE.urllib_request, "build_opener") as opener,
+            self.assertRaisesRegex(FABLE.AdvisorError, "api_key is empty"),
+        ):
+            FABLE.review_plan("disabled packet")
+        opener.assert_not_called()
+
+    def test_python_api_model_echo_mismatch_fails_before_fable_metadata(self) -> None:
+        self.set_direct_route("config-file")
+        self.write_python_api_provider(api_key="provider-secret", model="x-ai/grok-4.5")
+        opener = mock.Mock()
+        opener.open.return_value = FakeHttpResponse(
+            {
+                "model": "x-ai/grok-4.5-versioned",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "PLAN_APPROVED"}],
+            }
+        )
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}, clear=True),
+            mock.patch.object(FABLE.urllib_request, "build_opener", return_value=opener),
+            self.assertRaisesRegex(FABLE.AdvisorError, "requested model") as caught,
+        ):
+            FABLE.review_plan("mismatch packet")
+        self.assertIn("x-ai/grok-4.5-versioned", str(caught.exception))
+        self.assertNotIn("provider-secret", str(caught.exception))
+
+    def test_saved_advisor_path_is_inferred_and_inconsistency_is_rejected(self) -> None:
+        self.assertEqual(FABLE.load_fable_route(self.home)["path"], "claude-code-cli")
+        self.set_direct_route("user-settings")
+        self.assertEqual(FABLE.load_fable_route(self.home)["path"], "ccswitch")
+        self.set_direct_route("config-file")
+        self.assertEqual(FABLE.load_fable_route(self.home)["path"], "python-api")
+
+        state_path = self.home / FABLE.STATE_FILENAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["advisor"]["path"] = "ccswitch"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(FABLE.AdvisorError, "inconsistent"):
+            FABLE.load_fable_route(self.home)
+
+    def test_config_file_missing_or_invalid_after_routing_fails_closed(self) -> None:
+        self.set_direct_route("config-file")
+        for payload in (None, "not-json", json.dumps({"schema": 1})):
+            with self.subTest(payload=payload):
+                path = self.home / ".codex-orchestration-fable-api.json"
+                path.unlink(missing_ok=True)
+                if payload is not None:
+                    path.write_text(payload, encoding="utf-8")
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_HOME": str(self.home),
+                            "ANTHROPIC_AUTH_TOKEN": "fallback-must-not-run",
+                        },
+                        clear=True,
+                    ),
+                    mock.patch.object(FABLE.urllib_request, "build_opener") as opener,
+                    mock.patch.object(FABLE, "user_settings_api_invocation") as settings,
+                    mock.patch.object(FABLE, "resolve_claude") as resolve_claude,
+                    self.assertRaises(FABLE.AdvisorError) as caught,
+                ):
+                    FABLE.review_plan("packet")
+                self.assertIn("configure_fable_api.py", str(caught.exception))
+                self.assertNotIn("fallback-must-not-run", str(caught.exception))
+                opener.assert_not_called()
+                settings.assert_not_called()
+                resolve_claude.assert_not_called()
+
+    def test_config_file_source_requires_direct_api_transport(self) -> None:
+        state_path = self.home / FABLE.STATE_FILENAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["advisor"].update(
+            {
+                "auth_mode": "api",
+                "api_source": "config-file",
+                "transport": "claude-code",
+            }
+        )
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}, clear=True),
+            self.assertRaisesRegex(FABLE.AdvisorError, "requires direct-api"),
+        ):
+            FABLE.load_fable_route()
 
     def test_direct_api_key_and_route_validation_fail_closed(self) -> None:
         self.set_direct_route()
