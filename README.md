@@ -236,7 +236,7 @@ codex plugin marketplace upgrade codex-orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Version **0.5.2 or newer** includes Planner assignment and the direct Fable API advisor paths. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.2` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
+Version **0.5.3 or newer** includes Planner assignment and the direct Fable API advisor paths. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.3` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
 
 If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
 

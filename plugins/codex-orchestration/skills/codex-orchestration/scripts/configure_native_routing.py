@@ -460,7 +460,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.5.2",
+                        "version": "0.5.3",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -1278,7 +1278,13 @@ def _managed_matches(state: dict[str, Any], current: dict[str, Any]) -> bool:
     if isinstance(managed, dict) and "v2_thread_limit" in managed:
         if not (
             current["v2_thread_limit"] == managed["v2_thread_limit"]
-            and current["legacy_thread_limit"] is MISSING
+            # App Server may surface a key deleted by a null write as either
+            # absent or null in the effective layer.  Both mean the legacy
+            # limit is no longer active; any concrete value remains a conflict.
+            and (
+                current["legacy_thread_limit"] is MISSING
+                or current["legacy_thread_limit"] is None
+            )
         ):
             return False
     managed_mcp = managed.get("mcp")
@@ -1361,7 +1367,10 @@ def _status(
                     or "v2_thread_limit" not in state["managed"]
                     or (
                         effective["v2_thread_limit"] == state["managed"]["v2_thread_limit"]
-                        and effective["legacy_thread_limit"] is MISSING
+                        and (
+                            effective["legacy_thread_limit"] is MISSING
+                            or effective["legacy_thread_limit"] is None
+                        )
                     )
                 )
             ):

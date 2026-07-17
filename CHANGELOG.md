@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.5.2 — Unreleased
+## 0.5.3 — Unreleased
+
+- Accept the App Server's null effective readback for a removed legacy thread limit while retaining conflict detection for every concrete legacy limit.
+
+## 0.5.2
 
 - Preserve explicit role labels exactly: a model supplied as `planner:` can never be reinterpreted as an Advisor, and Fable Planner uses only the Planner operations.
 - Give Planner support a new plugin version so marketplace upgrade and reinstall replace the affected Advisor-only `0.5.0` cache instead of reusing it.

@@ -814,6 +814,36 @@ class NativeRoutingTests(unittest.TestCase):
         self.run_script("--disable", "--apply")
         self.assertEqual(self.read_fake_config(), initial)
 
+    def test_null_effective_legacy_thread_limit_is_treated_as_removed(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        effective = self.read_fake_config()
+        effective.setdefault("agents", {})["max_threads"] = None
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(effective), encoding="utf-8"
+        )
+
+        self.assertTrue(
+            NATIVE._managed_matches(state, NATIVE._current_values(effective))
+        )
+        concrete_legacy_limit = json.loads(json.dumps(effective))
+        concrete_legacy_limit["agents"]["max_threads"] = 4
+        self.assertFalse(
+            NATIVE._managed_matches(
+                state, NATIVE._current_values(concrete_legacy_limit)
+            )
+        )
+        status = self.run_script("--status", "--require-effective", check=False)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("Native policy: installed and effective", status.stdout)
+
     def test_existing_user_policy_requires_explicit_replace_and_is_restored(self) -> None:
         initial = {
             "features": {
