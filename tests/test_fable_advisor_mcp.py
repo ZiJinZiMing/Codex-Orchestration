@@ -356,7 +356,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             body,
             {
                 "model": "claude-fable-5",
-                "max_tokens": 65536,
+                "max_tokens": 131072,
                 "system": FABLE.SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": "complete packet"}],
             },
@@ -769,6 +769,72 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 opener.open.assert_called_once()
                 resolve_claude.assert_not_called()
                 run.assert_not_called()
+
+    def test_direct_api_refusal_reports_safe_details_and_stays_blocked(self) -> None:
+        self.set_direct_route()
+        self.write_user_api_settings(
+            ANTHROPIC_AUTH_TOKEN="secret-token",
+            ANTHROPIC_BASE_URL="http://127.0.0.1:15721",
+        )
+        payload = {
+            "model": "claude-fable-5",
+            "stop_reason": "refusal",
+            "stop_details": {
+                "type": "refusal",
+                "category": "cyber",
+                "explanation": "  Classified as cyber.\nDo not retry unchanged.  ",
+            },
+            "content": [
+                {"type": "text", "text": "PLAN_APPROVED secret-token"}
+            ],
+        }
+        opener = mock.Mock()
+        opener.open.return_value = FakeHttpResponse(payload)
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}, clear=True),
+            mock.patch.object(
+                FABLE.urllib_request, "build_opener", return_value=opener
+            ),
+            self.assertRaises(FABLE.AdvisorError) as raised,
+        ):
+            FABLE.review_plan("packet")
+
+        message = str(raised.exception)
+        self.assertIn("refusal_type='refusal'", message)
+        self.assertIn("category='cyber'", message)
+        self.assertIn(
+            "explanation='Classified as cyber. Do not retry unchanged.'", message
+        )
+        self.assertIn("executor work must remain blocked", message)
+        self.assertNotIn("PLAN_APPROVED", message)
+        self.assertNotIn("secret-token", message)
+
+    def test_direct_api_refusal_without_details_is_still_diagnostic(self) -> None:
+        self.set_direct_route()
+        self.write_user_api_settings(
+            ANTHROPIC_AUTH_TOKEN="secret-token",
+            ANTHROPIC_BASE_URL="http://127.0.0.1:15721",
+        )
+        opener = mock.Mock()
+        opener.open.return_value = FakeHttpResponse(
+            {
+                "model": "claude-fable-5",
+                "stop_reason": "refusal",
+                "stop_details": None,
+                "content": [],
+            }
+        )
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}, clear=True),
+            mock.patch.object(
+                FABLE.urllib_request, "build_opener", return_value=opener
+            ),
+            self.assertRaisesRegex(
+                FABLE.AdvisorError,
+                r"refusal_type=None; category=None; explanation=None",
+            ),
+        ):
+            FABLE.review_plan("packet")
 
     def test_direct_api_redirect_and_network_errors_are_secret_safe(self) -> None:
         self.set_direct_route()

@@ -45,7 +45,7 @@ TRANSPORTS = {"claude-code", "direct-api"}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 DIRECT_API_TIMEOUT_SECONDS = 600
-DIRECT_API_MAX_TOKENS = 65536
+DIRECT_API_MAX_TOKENS = 131072
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -82,6 +82,15 @@ Use PLAN_APPROVED only when no material gap is present. Use PLAN_REVISE when cor
 
 class AdvisorError(RuntimeError):
     pass
+
+
+def _safe_refusal_field(value: Any, max_chars: int = 512) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split())
+    if not cleaned:
+        return None
+    return cleaned[:max_chars]
 
 
 class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
@@ -748,8 +757,24 @@ def _review_plan_direct_api(
         raise AdvisorError(
             "Strict model verification failed: direct API returned an unapproved model echo."
         )
-    if payload.get("stop_reason") != "end_turn":
-        raise AdvisorError("Direct API response did not complete with end_turn.")
+    stop_reason = payload.get("stop_reason")
+    if stop_reason != "end_turn":
+        if stop_reason == "refusal":
+            details = payload.get("stop_details")
+            details = details if isinstance(details, dict) else {}
+            refusal_type = _safe_refusal_field(details.get("type"))
+            category = _safe_refusal_field(details.get("category"))
+            explanation = _safe_refusal_field(details.get("explanation"))
+            raise AdvisorError(
+                "Direct API response was refused; "
+                f"refusal_type={refusal_type!r}; category={category!r}; "
+                f"explanation={explanation!r}. Advisor unavailable; "
+                "executor work must remain blocked."
+            )
+        raise AdvisorError(
+            "Direct API response did not complete with end_turn; "
+            f"stop_reason={stop_reason!r}."
+        )
     content = payload.get("content")
     if not isinstance(content, list):
         raise AdvisorError("Direct API returned an unexpected response.")
