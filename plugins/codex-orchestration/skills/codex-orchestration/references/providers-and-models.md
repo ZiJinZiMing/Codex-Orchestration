@@ -19,36 +19,37 @@ These facts were source-checked and runtime-tested on July 10, 2026. Always capa
 
 | Capability | Current behavior | Consequence |
 | --- | --- | --- |
-| Sol model metadata | `multi_agent_version = v2` | A Sol root uses v2 without forcing the feature flag. |
-| Terra model metadata | `multi_agent_version = v2` | A Terra root also uses the native policy. |
-| Luna model metadata | `multi_agent_version = v1` | Luna is suitable as a v2 child, but a Luna root does not activate this v2 policy. |
+| Sol/Terra catalog metadata | May advertise v2 depending on the active catalog/provider | Setup does not rely on this metadata; it explicitly enables v2. |
+| Luna model metadata | `multi_agent_version = v1` in the tested catalog | Luna still works as a v2 child; the parent session owns the v2 spawn surface. |
 | `hide_spawn_agent_metadata = false` | Shows `agent_type`, `model`, `reasoning_effort`, and `service_tier` on v2 spawn | Required for direct route control; it does not select a route alone. |
 | `tool_namespace = "agents"` | On live-tested Desktop `0.144.0-alpha.4`, the default `collaboration` namespace rejected expanded model/effort metadata; `agents` accepted it and spawned Luna at `xhigh`. | Required for this validated direct-routing path. It changes the callable namespace but does not select Luna. |
 | `usage_hint_text` | Appended to the spawn tool description | Carries the exact Planner/Advisor/Executor routes where the root chooses children. |
 | `multi_agent_mode_hint_text` | Replaces the default proactive/explicit mode hint and is sent to root and child tasks | Must contain both root and child boundaries. |
-| Claude Fable 5 MCP route | Root-directed `create_plan`, `revise_plan`, and `review_plan` tools invoke the authenticated Claude Code CLI headlessly with no model tools | Built-in cross-provider Planner or Advisor exception; current MCP requests do not provide caller identity, so caller isolation is policy-enforced. |
+| Claude Fable 5 MCP route | Root-directed `create_plan` and `revise_plan` use the authenticated `claude-code` transport; `review_plan` uses the saved `claude-code` or `direct-api` transport and explicit authentication mode | Built-in cross-provider Planner or Advisor exception; current MCP requests do not provide caller identity, so caller isolation is policy-enforced. |
 | `fork_turns` default | `all` | Different model/effort/role overrides are rejected unless the call uses `none` or a positive partial fork. |
-| Effective concurrency | Determined by the active Codex version and `agents.max_threads` configuration | This plugin never changes the limit or forces a worker count. |
+| Effective concurrency | v2 uses `max_concurrent_threads_per_session`, including the root | Setup converts legacy `agents.max_threads = N` to `N + 1` and restores it on disable. |
 | Older CLI 0.142.5 | Rejects `multi_agent_mode_hint_text` as an unknown feature-table field | Never write the global native policy without checking every known shared-config client. |
 
-The installer does not infer this from version strings. It launches each detected binary with an isolated `CODEX_HOME` and probes whether it can parse all four managed fields. That is a config-compatibility check, not proof of a live child route.
+The installer does not infer support from version strings. It launches each detected binary with an isolated `CODEX_HOME` and probes whether it can parse the routing-control fields. That is a config-compatibility check, not proof of a live child route.
 
-## Why `enabled = true` is omitted
+## Why setup explicitly enables v2
 
-Current resolution prefers the selected model's `multi_agent_version` over the global feature flag. Sol and Terra already select v2, so the one-time setup does not need to force it.
+Codex 0.144.4 can expose `wait_agent` without exposing a usable v1 spawn namespace under some provider/capability combinations. The routing policy therefore sets `features.multi_agent_v2.enabled = true` instead of relying on model-catalog metadata. Because that release rejects `agents.max_threads` while v2 is enabled, setup migrates it to the v2 session limit and preserves restoration data.
 
-Forcing `features.multi_agent_v2.enabled = true` can:
+Enabling v2 can:
 
 - show an under-development feature warning;
-- conflict with an older `agents.max_threads` setting;
 - change behavior for unrelated root models without the user asking.
+
+Setup resolves the Codex 0.144.4 `agents.max_threads` conflict through the reversible migration above.
 
 If the user's config uses the older scalar form `multi_agent_v2 = true|false`, the configurator temporarily converts that value to the equivalent table form and records the original scalar. Disable restores the exact boolean only if no other table fields were added afterward.
 
-## What the four managed fields do
+## What the managed v2 fields do
 
 The control surface and the route are separate:
 
+- `enabled = true` activates the v2 tool surface;
 - `hide_spawn_agent_metadata = false` exposes the model, effort, agent-type, and service-tier spawn inputs;
 - `tool_namespace = "agents"` makes the expanded route callable on the currently validated Desktop build;
 - `multi_agent_mode_hint_text` carries the root/child behavior and safety boundaries;
@@ -153,7 +154,7 @@ Restore state lives at:
 ~/.codex/.codex-orchestration-routing.json
 ```
 
-It contains the prior and managed values of the four routing fields, chosen Planner/Advisor/Executor routes, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected for either planning seat, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
+It contains the prior and managed values of the v2 controls, any migrated thread limit, chosen Planner/Advisor/Executor routes, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected, it also records the non-secret path/transport/authentication/source enums and only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, endpoints, auth stores, account identifiers, plan metadata, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
 
 Disable compares every current managed value before restoration. If the user edited a managed field after setup, it stops instead of erasing that work. Without state, each surviving marker proves ownership only of that hint string. Disable may safely remove the marked string or strings, but it leaves metadata visibility and the tool namespace unchanged because their previous values are unknown.
 
@@ -215,15 +216,15 @@ On Windows, the custom-agent configurator can create a new role but refuses in-p
 
 Direct v2 `model` overrides retain the parent's provider. They are the simplest route for an OpenAI root and OpenAI Luna/Terra child.
 
-Claude Fable 5 is the explicit built-in exception for Planner or Advisor. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
+Claude Fable 5 is the explicit built-in Planner or Advisor exception. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server uses one explicit transport: the official `claude` CLI or, for Advisor review, a direct Anthropic-compatible Messages request. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. Missing transport in legacy state means `claude-code`. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
 
-The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vertex/Foundry selection variables from the child environment. It re-checks `claude auth status`, pins `claude-fable-5` and the saved effort, disables tools and session persistence, disables prompt suggestions, and requires JSON runtime metadata to contain that primary model. Claude Code currently reports the internal helper `claude-haiku-4-5-20251001` during valid Fable calls; the bridge permits only that exact helper ID and returns every observed ID in `used_models`. Missing Fable or any unknown additional model fails closed. Helper rotation therefore requires a reviewed plugin update rather than a wildcard. Setup and status never make a model call.
+`subscription` requires a first-party Pro or Max login and the `claude-code` transport; it removes API credentials, Base URL, custom headers, and provider overrides, and refuses to run while supported API configuration exists. User-facing Fable routes are classified as Claude Code CLI (`claude-code`), CCSwitch (`direct-api` plus `user-settings`), or Python API (`direct-api` plus `config-file`; explicit legacy `environment` state remains compatible). The saved source is authoritative and never falls back. Python API reads only `CODEX_HOME/.codex-orchestration-fable-api.json`: schema 2 groups URL, API key, provider model, and auth type; the default key is empty and disables the path, while the default provider model is `anthropic/claude-fable-5`. Strict schema-1 files remain readable without rewrite. `auto` checks subscription only when no API configuration exists and otherwise requires explicit API mode/source.
 
-The saved policy authorizes the root to call these planning tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. The bridge mechanically uses the same full saved-state validator as native status/disable, restricts the operation surface, and runs Fable without tools or persistence.
+The `claude-code` transport accepts a static credential or `apiKeyHelper`, isolates user settings, adds `--bare` for API auth, pins every Claude Code model slot and applied effort, disables tools/session persistence/title traffic/refusal fallback, and validates the exact transport-specific runtime model set. The subscription path permits only its explicitly documented helper model in addition to Fable; API-backed paths require canonical Fable-only metadata. The `direct-api` transport accepts exactly one static credential, rejects helpers/custom headers/ambiguous sources/unsafe URLs, follows no redirects, performs zero retries, sends no effort field, and requires `stop_reason=end_turn`. Its standalone initializer stores the exact Messages URL, provider model, authentication type, and API key in one user-owned file with atomic write and best-effort restrictive permissions; the key is never accepted as an argument or emitted by status. Runtime reloads the selected source on every request and fails closed if it is missing, disabled, or invalid. CCSwitch and explicit legacy environment routes accept only the canonical or Anthropic-qualified Fable model echo. Python API instead sends its configured provider model, requires the response model to match that provider field byte-for-byte, preserves both values as `request_model`/`response_model`, and then canonicalizes the advisor identity to Fable-only `model`/`used_models`. It reports the saved effort separately as configured but not applied. All three paths fail closed without transport fallback. Setup and status make no model call and never expose credentials or endpoint values. Direct metadata proves one local HTTP attempt and a matching provider model echo, not the gateway's internal routing, upstream physical model, or billing account.
 
-Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, update, disable, or Fable trusts them. Unknown extensions intentionally fail closed.
+The saved policy authorizes only the root to call these planning tools. Current MCP requests provide no caller identity, so that boundary is instruction-enforced rather than server-authenticated; no-tools execution and state authorization are mechanical. Saved state compatibility is explicit: schema 1 predates Fable and Planner, schema 2 may authorize only the historical Fable Advisor shape, and schema 3 adds Planner plus the validated non-secret route extensions. Schema and policy values must be exact integers, and unknown extensions fail closed.
 
-Fable setup defaults to `high`. It accepts the Claude Code effort values `low`, `medium`, `high`, `xhigh`, and `max`; the user-facing label `ultra` normalizes to the effective Claude Code value `max` because the CLI has no separate Ultra setting. Setup checks the installed CLI's advertised choices before persisting the route. The bridge reads only the normalized saved value, so tool callers cannot raise the effort at review time. Existing saved `max` routes remain compatible.
+Fable setup defaults to `high`. Claude Code accepts `low`, `medium`, `high`, `xhigh`, and `max`; `ultra` normalizes to `max`. Direct API retains the configured value for reporting but does not apply it. Fable is asked to put `PLAN_APPROVED` or `PLAN_REVISE` first. If runtime metadata confirms Fable but the marker is omitted, the bridge returns `PLAN_REVISE` conservatively; it never infers approval from free-form review text.
 
 A cross-provider seat normally needs:
 
@@ -242,9 +243,9 @@ A task-local Planner or Advisor is planning-only by instruction. Do not claim it
 
 A saved advisor requests `sandbox_mode = "read-only"`, but live parent permission overrides may be reapplied to children. Keep the behavioral prohibition on edits and mutation even with the requested sandbox.
 
-The Claude Fable 5 bridge is mechanically narrower than a child: its tools accept only bounded plan or review inputs, launch Claude with safe mode and no tools, and expose no edit or shell operation. It still has open-world model access, so every call must be deliberate and self-contained.
+The Claude Fable 5 bridge is mechanically narrower than a child: its tools accept only bounded plan or review inputs; its CLI path launches Claude with safe mode and no tools, while its direct Advisor path makes one tool-free Messages request. Neither exposes an edit or shell operation. It still has open-world model access, so every call must be deliberate and self-contained.
 
-Planner or Advisor failure is never approval. Configured seats are required for a non-trivial Executor plan unless the user explicitly marks one best-effort for the current task. Transport failure, malformed output, missing context, stale plan versions, or wrong routes stop Executor work by default.
+Planner or Advisor failure is never approval. Configured seats are required for a non-trivial Executor plan unless the user explicitly marks one best-effort for the current task. Transport failure, redirect, truncation, malformed output, missing context, stale plan versions, wrong routes, missing model metadata, or an invalid model set stops Executor work by default.
 
 Every Advisor call is fresh and stateless. The root carries the canonical current plan, numbered version, and compact cumulative findings ledger. `PLAN_REVISE` returns to the same Planner route; `PLAN_APPROVED` stops the loop. The root allows at most five Advisor reviews. Review five without approval halts with the current plan, ledger, and unresolved findings instead of silently executing.
 
@@ -254,13 +255,13 @@ This skill does not create, start, pause, clear, or alter a Goal. If the user al
 
 Even when the write API requests user-config reload, this transient installer cannot retroactively rewrite the developer policy already compiled into another task. Start a new task after setup, update, disable, or custom-agent changes.
 
-A personal policy can be overridden by a trusted project's `.codex/config.toml` or a managed layer. Run status from the target workspace. “Policy installed” describes the user layer; “effective in this workspace” additionally confirms that no higher-precedence layer replaces the managed fields there. Neither status proves that the model selected for a future task activates v2.
+A personal policy can be overridden by a trusted project's `.codex/config.toml` or a managed layer. Run status from the target workspace. “Policy installed” describes the user layer; “effective in this workspace” additionally confirms that no higher-precedence layer replaces the managed fields there. Neither status proves that a live child route was used.
 
-Named profile-v2 files are separate selected user layers. The default command does not start App Server with `--profile`, so its write/readback does not verify a named profile. A profile user must inspect that layer separately and ensure it does not override the four routing fields, or use the task-local fallback.
+Named profile-v2 files are separate selected user layers. The default command does not start App Server with `--profile`, so its write/readback does not verify a named profile. A profile user must inspect that layer separately and ensure it does not override the managed v2 fields, or use the task-local fallback.
 
 ## Concurrency and service tier
 
-The effective concurrency limit belongs to the active Codex version and `agents.max_threads` configuration. This plugin never changes that limit or forces a worker count. Codex should parallelize only independent slices with non-overlapping write ownership.
+For v2, the effective limit is `max_concurrent_threads_per_session` and includes the root. Setup preserves an existing v2 limit; when only legacy `agents.max_threads = N` exists, it migrates to `N + 1` so child capacity stays the same. The policy still does not force a worker count. Codex should parallelize only independent slices with non-overlapping write ownership.
 
 Child service tier can inherit from the parent when supported. There is no portable “force standard tier” spawn setting that works across current catalogs. If allowance savings are the priority, do not enable Fast/priority on the root.
 
@@ -268,7 +269,7 @@ Child service tier can inherit from the parent when supported. There is no porta
 
 Use precise language:
 
-- `native policy installed`: managed user policy exists; activation still depends on root model and effective workspace config;
+- `native policy installed`: managed user policy exists; activation still depends on effective workspace config;
 - `policy effective`: the managed fields win in the current workspace; this is still not a live spawn;
 - `pinned custom agent available`: matching role loaded, not yet used;
 - `route accepted`: exact controls were accepted and validated by the current tool;

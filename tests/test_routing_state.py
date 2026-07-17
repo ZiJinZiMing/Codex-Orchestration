@@ -36,6 +36,18 @@ def fable_route(server: str = "fable-advisor-python3") -> dict[str, str]:
     }
 
 
+def direct_fable_route(
+    *, source: str = "user-settings", path: str = "ccswitch"
+) -> dict[str, str]:
+    return {
+        **fable_route(),
+        "auth_mode": "api",
+        "api_source": source,
+        "transport": "direct-api",
+        "path": path,
+    }
+
+
 def genuine_state(schema: int) -> dict[str, object]:
     managed: dict[str, object] = {
         "mode": f"{STATE.MANAGED_MARKER}\nmode body",
@@ -83,6 +95,59 @@ class RoutingStateTests(unittest.TestCase):
             with self.subTest(schema=schema):
                 state = genuine_state(schema)
                 self.assertIs(STATE.validate_routing_state(state), state)
+
+    def test_combined_schema_four_and_historical_direct_schema_are_accepted(self) -> None:
+        combined = genuine_state(3)
+        combined.update(schema=4, policy_version=4)
+        combined["planner"] = {
+            "kind": "model",
+            "model": "gpt-planner",
+            "effort": "high",
+        }
+        combined["advisor"] = direct_fable_route()
+        combined["managed"]["enabled"] = True
+        combined["previous"]["enabled"] = snapshot(False, present=True)
+        self.assertIs(STATE.validate_routing_state(combined), combined)
+
+        historical_direct = genuine_state(2)
+        historical_direct.update(schema=3, policy_version=2)
+        historical_direct["advisor"] = direct_fable_route(
+            source="config-file", path="python-api"
+        )
+        historical_direct["managed"]["enabled"] = True
+        historical_direct["previous"]["enabled"] = snapshot()
+        self.assertIs(STATE.validate_routing_state(historical_direct), historical_direct)
+
+    def test_schema_four_direct_route_extensions_fail_closed(self) -> None:
+        baseline = genuine_state(3)
+        baseline.update(schema=4, policy_version=4)
+        baseline["planner"] = {
+            "kind": "model",
+            "model": "gpt-planner",
+            "effort": "high",
+        }
+        baseline["advisor"] = direct_fable_route()
+        baseline["managed"]["enabled"] = True
+        baseline["previous"]["enabled"] = snapshot()
+
+        mutations = [
+            lambda state: state["advisor"].update(path="python-api"),
+            lambda state: state["advisor"].update(auth_mode="subscription"),
+            lambda state: state["advisor"].pop("api_source"),
+            lambda state: state["advisor"].update(future=True),
+            lambda state: state["advisor"].update(auth_mode=[]),
+            lambda state: state["advisor"].update(transport={}),
+            lambda state: state["advisor"].update(api_source=[]),
+            lambda state: state["advisor"].update(path={}),
+            lambda state: state["managed"].pop("enabled"),
+            lambda state: state["managed"].update(enabled=False),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                state = deepcopy(baseline)
+                mutate(state)
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
 
     def test_scalar_conversion_and_retained_disabled_mcp_are_accepted(self) -> None:
         state = genuine_state(3)

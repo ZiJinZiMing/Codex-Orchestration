@@ -81,9 +81,81 @@ Or let your current Codex model plan and use Fable 5 only as Advisor:
 
 After setup, start another new task and use Codex normally. The saved workflow applies automatically.
 
-Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is accepted as an alias for Max because Claude Code does not expose a separate Ultra effort.
+Claude Fable 5 has three explicit advisor paths. The selected path is saved in routing state and printed by setup and status; paths never fall back to each other.
 
-Fable 5 uses the official Claude Code CLI and a compatible first-party Claude login. You do not need to add an Anthropic API key to Codex.
+| Advisor path | Internal route | Configuration source |
+| --- | --- | --- |
+| Claude Code CLI | `claude-code` | Claude Code login or explicitly selected CLI API authentication |
+| CCSwitch | `direct-api` + `user-settings` | CCSwitch-managed Claude user settings and loopback proxy |
+| Python API | `direct-api` + `config-file` | Plugin-owned provider configuration under `CODEX_HOME` |
+
+The older `direct-api` + `environment` source remains a compatibility form of the Python API path. It is used only when routing state explicitly selects `environment`; it never overrides or rescues a selected config-file path.
+
+For a standalone Python API route, create the disabled default provider file first:
+
+```bash
+python3 <skill-dir>/scripts/configure_fable_api.py --init-default
+```
+
+It creates `CODEX_HOME/.codex-orchestration-fable-api.json` without overwriting an existing file:
+
+```json
+{
+  "schema": 2,
+  "provider": {
+    "api_url": "https://openrouter.ai/api/v1/messages",
+    "api_key": "",
+    "model": "anthropic/claude-fable-5",
+    "auth_type": "bearer"
+  }
+}
+```
+
+`api_url`, `api_key`, `model`, and `auth_type` are one provider configuration. The provider model is the exact outbound API model field and may be changed to another safe provider identifier; the orchestration identity remains Claude Fable 5. An empty `api_key` keeps the Python API path disabled and no request is made. Configure a key through the initializer's hidden prompt (never on the command line) or protect the file before editing it directly. Legacy schema-1 files remain strictly supported and are never rewritten automatically.
+
+To replace the disabled default through the hidden key prompt while keeping the documented defaults:
+
+```text
+python3 <skill-dir>/scripts/configure_fable_api.py --force --api-url https://openrouter.ai/api/v1/messages --model anthropic/claude-fable-5 --auth-type bearer
+```
+
+Then apply the route:
+
+```bash
+python3 <skill-dir>/scripts/configure_native_routing.py \
+  --codex-bin <active-codex-binary> \
+  --executor-model gpt-5.6-luna \
+  --executor-effort xhigh \
+  --advisor-fable \
+  --advisor-effort high \
+  --advisor-auth-mode api \
+  --advisor-api-source config-file \
+  --advisor-transport direct-api \
+  --apply
+```
+
+The standalone file may contain a metered credential after configuration, is never copied into routing state or tool output, and must not be committed or shared. The initializer writes it atomically and requests owner-only permissions where the operating system supports them; local administrators can still read a user-owned file, and Windows does not provide Unix `0600` semantics through Python alone.
+
+CC Switch remains an optional alternative. Configure its OpenRouter provider with Anthropic Messages format and map Fable to `anthropic/claude-fable-5`. Let it maintain `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` in Claude Code user settings; the local Base URL may be its loopback proxy such as `http://127.0.0.1:15721`. Then apply the same direct transport with `--advisor-api-source user-settings`.
+
+```bash
+python3 <skill-dir>/scripts/configure_native_routing.py \
+  --codex-bin <active-codex-binary> \
+  --executor-model gpt-5.6-luna \
+  --executor-effort xhigh \
+  --advisor-fable \
+  --advisor-effort high \
+  --advisor-auth-mode api \
+  --advisor-api-source user-settings \
+  --advisor-transport direct-api \
+  --apply
+```
+
+Plugin installation itself has no secure interactive credential hook. Python API setup refuses to continue until the provider file exists and has a non-empty key. Runtime reloads and validates the selected source for every review; missing, disabled, or invalid configuration fails closed without consulting Claude settings, CCSwitch, environment variables, or another path.
+
+Fable defaults to **High**. With the Claude Code transport you can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**; **Ultra** is accepted as an alias for Max. Direct API records the configured effort for reporting but does not send or apply it.
+
+Fable 5 can use the official Claude Code CLI with a compatible first-party login, or an explicitly selected direct API source. With the subscription path you do not need to add an Anthropic API key to Codex. Credentials remain in the selected source and are never copied into Codex routing state.
 
 ## Choose your roles
 
@@ -110,7 +182,7 @@ Examples:
 
 ## Bring another model into Codex
 
-Models already available through Codex can be assigned directly. A model from another provider needs an existing authenticated, compatible provider and a Codex custom-agent role.
+Models already available through Codex on the current provider can be assigned directly. Other models must already be available through Codex via an existing authenticated, compatible provider and a Codex custom-agent role. In all cases, cross-provider routing requires an authenticated, compatible provider.
 
 Ask the plugin to create a project or personal role:
 
@@ -123,9 +195,11 @@ effort: high
 job: gather evidence and cite sources
 ```
 
+For several roles at once, start with `/codex-orchestration create these project roles:` and list each bounded role specification.
+
 Project roles live in `.codex/agents/`. Personal roles live in `~/.codex/agents/` and can be reused across projects. Codex previews role files before creating them.
 
-Fable 5 is the bundled cross-provider exception and can be used directly as Planner or Advisor. The plugin never creates provider accounts, credentials, or protocol compatibility.
+Fable 5 is the bundled cross-provider exception and can be used directly as Planner or Advisor. Fable 5 is a root-facing plan advisor, not a second orchestrator, when assigned to Advisor; when assigned to Planner, it still reports its plan only to the Codex root. The plugin never creates provider accounts, credentials, or protocol compatibility.
 
 ## Use it with Codex Goals
 
@@ -162,7 +236,7 @@ codex plugin marketplace upgrade codex-orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Version **0.5.1 or newer** is required for reliable Planner assignment. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.1` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
+Version **0.5.2 or newer** includes Planner assignment and the direct Fable API advisor paths. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.2` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
 
 If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
 

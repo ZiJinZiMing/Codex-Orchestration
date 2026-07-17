@@ -24,7 +24,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.5.1")
+        self.assertEqual(manifest["version"], "0.5.2")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -41,13 +41,16 @@ class PackagingTests(unittest.TestCase):
         native = SKILL_ROOT / "scripts" / "configure_native_routing.py"
         custom = SKILL_ROOT / "scripts" / "configure_orchestration.py"
         routing_state = SKILL_ROOT / "scripts" / "routing_state.py"
+        fable_api = SKILL_ROOT / "scripts" / "configure_fable_api.py"
         self.assertTrue(native.is_file())
         self.assertTrue(custom.is_file())
         self.assertTrue(routing_state.is_file())
+        self.assertTrue(fable_api.is_file())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.5.1"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.5.2"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
+        self.assertIn("credential-stdin", fable_api.read_text(encoding="utf-8"))
 
     def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
         mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
@@ -65,6 +68,10 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(server["cwd"], ".")
             self.assertIn("fable_advisor_mcp.py", server["args"][-1])
         self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
+        self.assertIn(
+            ".codex-orchestration-fable-api.json",
+            (REPO_ROOT / ".gitignore").read_text(encoding="utf-8"),
+        )
 
     def test_explicit_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -75,6 +82,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/codex-orchestration setup executor:", readme)
         self.assertIn("GPT-5.6 Luna Extra High", readme)
         self.assertIn("/codex-orchestration create project role:", readme)
+        self.assertIn("/codex-orchestration create these project roles:", readme)
         self.assertIn("/codex-orchestration status", readme)
         self.assertIn("/codex-orchestration disable", readme)
         self.assertIn("codex plugin add codex-orchestration@codex-orchestration", readme)
@@ -110,7 +118,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.5.1"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.5.2"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
@@ -137,12 +145,23 @@ class PackagingTests(unittest.TestCase):
         routing_state = (SKILL_ROOT / "scripts" / "routing_state.py").read_text(
             encoding="utf-8"
         )
+        native = (SKILL_ROOT / "scripts" / "configure_native_routing.py").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("Other providers must already be configured and authenticated", readme)
         self.assertIn("never creates credentials or bypasses permissions", readme)
         self.assertIn("Codex decides when delegation or parallel work is useful", readme)
         self.assertIn("Fable 5 is the bundled cross-provider exception", readme)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', routing_state)
+        self.assertIn("Fable 5 is a root-facing plan advisor, not a second orchestrator", readme)
+        self.assertIn("Claude Fable 5 has three explicit advisor paths", readme)
+        self.assertIn("configure_fable_api.py --init-default", readme)
+        self.assertIn('"api_key": ""', readme)
+        self.assertIn("--advisor-api-source config-file", readme)
+        self.assertIn("configure_fable_api.py", readme)
+        self.assertIn("paths never fall back to each other", readme)
+        self.assertIn("ROUTING_TOOL_NAMESPACE,", native)
 
     def test_ascii_and_role_copy_are_plain_and_root_centered(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -184,6 +203,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Models already available through Codex", readme)
         self.assertIn("an existing authenticated, compatible provider", readme)
         self.assertIn("do not need to add an Anthropic API key to Codex", readme)
+        self.assertIn("Other models must already be available through Codex", readme)
+        self.assertIn("an authenticated, compatible provider", readme)
+        self.assertIn("never copied into routing state or tool output", readme)
         self.assertIn("`.codex/agents/`", readme)
         self.assertIn("`~/.codex/agents/`", readme)
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -214,7 +236,7 @@ class PackagingTests(unittest.TestCase):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("/codex-orchestration status", readme)
-        self.assertIn("Version **0.5.1 or newer**", readme)
+        self.assertIn("Version **0.5.2 or newer**", readme)
         self.assertIn("`marketplaceSource.sourceType` is `local`", readme)
         self.assertIn("`disable` restores the routing values", readme)
         self.assertIn("does not delete user-owned custom roles", readme)

@@ -39,8 +39,18 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 3
-STATE_SCHEMA = 3
+POLICY_VERSION = 4
+STATE_SCHEMA = 4
+FABLE_AUTH_MODES = {"subscription", "api", "auto"}
+FABLE_API_SOURCES = {"config-file", "environment", "user-settings"}
+FABLE_TRANSPORTS = {"claude-code", "direct-api"}
+FABLE_ADVISOR_PATHS = {"claude-code-cli", "ccswitch", "python-api"}
+FABLE_ADVISOR_PATH_DISPLAY = {
+    "claude-code-cli": "Claude Code CLI",
+    "ccswitch": "CCSwitch",
+    "python-api": "Python API",
+}
+V2_THREAD_LIMIT = 5
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
@@ -68,6 +78,18 @@ MISSING = object()
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+def fable_advisor_path(transport: str, api_source: str | None) -> str:
+    """Map a Fable transport/source pair to its user-visible execution path."""
+
+    if transport == "claude-code":
+        return "claude-code-cli"
+    if transport == "direct-api" and api_source == "user-settings":
+        return "ccswitch"
+    if transport == "direct-api" and api_source in {"config-file", "environment"}:
+        return "python-api"
+    raise ConfigurationError("Invalid Claude Fable 5 advisor path.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,6 +150,27 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Exact supported advisor effort, or auto.",
     )
+    parser.add_argument(
+        "--advisor-auth-mode",
+        choices=sorted(FABLE_AUTH_MODES),
+        help=(
+            "Claude Fable 5 authentication mode: subscription, api, or auto "
+            "(default for --advisor-fable: auto)."
+        ),
+    )
+    parser.add_argument(
+        "--advisor-api-source",
+        choices=sorted(FABLE_API_SOURCES),
+        help=(
+            "With Fable api mode, use the standalone config-file, environment, "
+            "or user-settings source."
+        ),
+    )
+    parser.add_argument(
+        "--advisor-transport",
+        choices=sorted(FABLE_TRANSPORTS),
+        help="Fable transport: claude-code (default) or direct-api.",
+    )
 
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument(
@@ -175,6 +218,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.advisor_auth_mode,
+            args.advisor_api_source,
+            args.advisor_transport,
         )
     ):
         raise ConfigurationError("--status does not accept seat settings.")
@@ -188,6 +234,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.advisor_auth_mode,
+            args.advisor_api_source,
+            args.advisor_transport,
         )
     ):
         raise ConfigurationError("--disable does not accept seat settings.")
@@ -208,6 +257,32 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.advisor_agent and args.advisor_effort != "auto":
         raise ConfigurationError(
             "A custom advisor agent owns its effort; omit --advisor-effort."
+        )
+    if args.advisor_auth_mode is not None and not args.advisor_fable:
+        raise ConfigurationError("--advisor-auth-mode requires --advisor-fable.")
+    if args.advisor_api_source is not None and not args.advisor_fable:
+        raise ConfigurationError("--advisor-api-source requires --advisor-fable.")
+    if args.advisor_transport is not None and not args.advisor_fable:
+        raise ConfigurationError("--advisor-transport requires --advisor-fable.")
+    if args.advisor_auth_mode == "api" and args.advisor_api_source is None:
+        raise ConfigurationError(
+            "Fable api mode requires --advisor-api-source config-file, environment, "
+            "or user-settings."
+        )
+    if args.advisor_api_source is not None and args.advisor_auth_mode != "api":
+        raise ConfigurationError(
+            "--advisor-api-source is valid only with --advisor-auth-mode api."
+        )
+    if args.advisor_transport == "direct-api" and args.advisor_auth_mode != "api":
+        raise ConfigurationError(
+            "Fable direct-api transport requires --advisor-auth-mode api."
+        )
+    if (
+        args.advisor_api_source == "config-file"
+        and args.advisor_transport != "direct-api"
+    ):
+        raise ConfigurationError(
+            "Fable config-file source requires --advisor-transport direct-api."
         )
     if args.planner_fable:
         normalize_fable_effort(args.planner_effort)
@@ -287,6 +362,8 @@ def supports_native_policy(binary: Path) -> tuple[bool, str]:
             result = subprocess.run(
                 [
                     str(binary),
+                    "-c",
+                    "features.multi_agent_v2.enabled=true",
                     "-c",
                     "features.multi_agent_v2.hide_spawn_agent_metadata=false",
                     "-c",
@@ -383,7 +460,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.5.1",
+                        "version": "0.5.2",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -822,29 +899,53 @@ def select_fable_server() -> str:
     )
 
 
-def verify_fable_prerequisites(effort: str) -> dict[str, str]:
+def verify_fable_prerequisites(
+    auth_mode: str,
+    api_source: str | None = None,
+    transport: str = "claude-code",
+    codex_home: Path | None = None,
+    *,
+    effort: str | None = None,
+) -> dict[str, Any]:
+    """Validate the selected Fable auth/transport without making a model call."""
+
     try:
-        from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
+        from fable_advisor_mcp import (
+            AdvisorError,
+            check_claude_auth,
+            direct_api_configuration,
+            environment_for_auth_path,
+            resolve_claude,
+        )
     except ImportError as exc:  # pragma: no cover - corrupt package
         raise ConfigurationError("The bundled Claude Fable 5 bridge is missing.") from exc
+
+    if transport == "direct-api":
+        if auth_mode != "api" or api_source is None:
+            raise ConfigurationError(
+                "Fable direct-api transport requires api authentication and a source."
+            )
+        try:
+            # The standalone config is scoped to CODEX_HOME; environment and
+            # user-settings are resolved from the process environment/home.
+            config_home = codex_home if api_source == "config-file" else None
+            _, _, auth = direct_api_configuration(api_source, config_home)
+        except AdvisorError as exc:
+            raise ConfigurationError(str(exc)) from exc
+        return {"transport": transport, **auth}
+
+    if transport != "claude-code":
+        raise ConfigurationError(f"Unsupported Fable transport: {transport!r}.")
     try:
         claude = resolve_claude()
-        auth = check_claude_auth(claude)
+        auth = check_claude_auth(claude, auth_mode, api_source)
         help_result = subprocess.run(
             [str(claude), "--help"],
-            env={
-                key: value
-                for key, value in os.environ.items()
-                if key
-                not in {
-                    "ANTHROPIC_API_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "CLAUDE_CODE_USE_BEDROCK",
-                    "CLAUDE_CODE_USE_VERTEX",
-                    "CLAUDE_CODE_USE_FOUNDRY",
-                }
-            },
+            env=environment_for_auth_path(
+                auth.get("auth_path", "subscription"), auth.get("api_source")
+            ),
             text=True,
+            encoding="utf-8",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=PROBE_TIMEOUT_SECONDS,
@@ -852,7 +953,12 @@ def verify_fable_prerequisites(effort: str) -> dict[str, str]:
         )
     except (AdvisorError, OSError, subprocess.TimeoutExpired) as exc:
         raise ConfigurationError(str(exc)) from exc
-    required = ("--model", "--effort", "--safe-mode", "--prompt-suggestions")
+    required = (
+        "--model",
+        "--effort",
+        "--safe-mode",
+        "--prompt-suggestions",
+    )
     missing = [flag for flag in required if flag not in help_result.stdout]
     if help_result.returncode != 0 or missing:
         detail = ", ".join(missing) if missing else f"exit {help_result.returncode}"
@@ -869,19 +975,38 @@ def verify_fable_prerequisites(effort: str) -> dict[str, str]:
         if effort_match is not None
         else set()
     )
-    if effort not in advertised_efforts:
+    # Claude Code owns the accepted CLI effort values. ``ultra`` is normalized
+    # to ``max`` before this probe, while xhigh remains a valid main-branch seat.
+    fable_effort = normalize_fable_effort(effort or "auto")
+    if not advertised_efforts:
+        # Older fake/real clients may omit the parenthesized list; the required
+        # flags still provide the compatibility gate.
+        advertised_efforts = set(FABLE_EFFORTS)
+    if fable_effort not in advertised_efforts:
         raise ConfigurationError(
-            f"Claude Code does not advertise Fable effort {effort!r}; "
+            f"Claude Code does not advertise Fable effort {fable_effort!r}; "
             "update Claude Code or choose a supported effort."
         )
-    return {"claude": str(claude), **auth}
+    return {"claude": str(claude), "transport": transport, **auth}
 
 
 def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
-        return f"Claude Fable 5 {route['effort']}"
+        effort = route["effort"]
+        auth_mode = route.get("auth_mode", "subscription")
+        source = f", {route['api_source']}" if auth_mode == "api" else ""
+        transport = route.get("transport", "claude-code")
+        path = route.get("path") or fable_advisor_path(
+            transport, route.get("api_source")
+        )
+        # The direct bridge does not consume Claude CLI effort flags.
+        effort_label = "effort not applied" if transport == "direct-api" else effort
+        return (
+            f"Claude Fable 5 {effort_label} "
+            f"({FABLE_ADVISOR_PATH_DISPLAY[path]}; {transport}, {auth_mode}{source})"
+        )
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1025,8 +1150,10 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
             "For an advisor review, call `review_plan` from MCP server "
             f"{json.dumps(advisor['server'])} with the round's self-contained packet. "
             "This is a read-only root tool call, not a spawned child. Require "
-            "PLAN_APPROVED or PLAN_REVISE and fail closed unless the user explicitly "
-            "made Advisor failure best-effort for the current task."
+            "PLAN_APPROVED or PLAN_REVISE plus model = \"claude-fable-5\" and "
+            "used_models = [\"claude-fable-5\"]. Missing or mixed model metadata "
+            "means Advisor unavailable; do not release executor work; fail closed unless the user explicitly made "
+            "Advisor failure best-effort for the current task."
         )
     elif advisor is not None:
         advisor_hint = (
@@ -1087,6 +1214,14 @@ def _compatibility_report(
 def _current_values(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "feature": nested_get(config, "features", "multi_agent_v2"),
+        "enabled": nested_get(config, "features", "multi_agent_v2", "enabled"),
+        "v2_thread_limit": nested_get(
+            config,
+            "features",
+            "multi_agent_v2",
+            "max_concurrent_threads_per_session",
+        ),
+        "legacy_thread_limit": nested_get(config, "agents", "max_threads"),
         "mode": nested_get(
             config, "features", "multi_agent_v2", "multi_agent_mode_hint_text"
         ),
@@ -1119,8 +1254,19 @@ def _is_managed(value: Any) -> bool:
 
 def _managed_matches(state: dict[str, Any], current: dict[str, Any]) -> bool:
     managed = state.get("managed")
+    schema = state.get("schema")
+    policy_version = state.get("policy_version")
+    # Schema 3/policy 2 introduced explicit v2 activation and migration fields;
+    # schema 4/policy 4 retains them. Schema 3/policy 3 inherited activation.
+    explicit_v2 = (schema, policy_version) in {(3, 2), (4, 4)}
+    activation_matches = (
+        managed.get("enabled") is True and current["enabled"] is True
+        if isinstance(managed, dict) and explicit_v2
+        else True
+    )
     base_matches = (
         isinstance(managed, dict)
+        and activation_matches
         and current["mode"] == managed.get("mode")
         and current["usage"] == managed.get("usage")
         and current["metadata"] is False
@@ -1129,6 +1275,12 @@ def _managed_matches(state: dict[str, Any], current: dict[str, Any]) -> bool:
     )
     if not base_matches:
         return False
+    if isinstance(managed, dict) and "v2_thread_limit" in managed:
+        if not (
+            current["v2_thread_limit"] == managed["v2_thread_limit"]
+            and current["legacy_thread_limit"] is MISSING
+        ):
+            return False
     managed_mcp = managed.get("mcp")
     return managed_mcp is None or all(
         current["mcp"].get(server, MISSING) == enabled
@@ -1184,20 +1336,34 @@ def _status(
             current["usage"]
         )
         state_matches = state is not None and _managed_matches(state, current)
+        state_explicit_v2 = state is not None and (
+            state.get("schema"), state.get("policy_version")
+        ) in {(3, 2), (4, 4)}
         if state is not None and managed_pair and not state_matches:
             routing_state = "managed fields conflict with local restore state"
         elif managed_pair:
             controls_ready = (
-                current["metadata"] is False
+                (not state_explicit_v2 or current["enabled"] is True)
+                and current["metadata"] is False
                 and current["namespace"] == ROUTING_TOOL_NAMESPACE
             )
             if not controls_ready:
                 routing_state = "managed hints found but routing controls are incomplete"
             elif (
-                effective["mode"] == current["mode"]
+                (not state_explicit_v2 or effective["enabled"] is True)
+                and effective["mode"] == current["mode"]
                 and effective["usage"] == current["usage"]
                 and effective["metadata"] is False
                 and effective["namespace"] == ROUTING_TOOL_NAMESPACE
+                and (
+                    state is None
+                    or not isinstance(state.get("managed"), dict)
+                    or "v2_thread_limit" not in state["managed"]
+                    or (
+                        effective["v2_thread_limit"] == state["managed"]["v2_thread_limit"]
+                        and effective["legacy_thread_limit"] is MISSING
+                    )
+                )
             ):
                 routing_state = f"installed and effective in {workspace}"
             else:
@@ -1207,10 +1373,17 @@ def _status(
         else:
             routing_state = "partial or user-authored"
         print(f"Native policy: {routing_state}")
-        print(
-            "V2 activation: not inferred by the installer; choose a v2 root "
-            "model such as current Sol or Terra"
-        )
+        if state_explicit_v2:
+            print(
+                "V2 activation: enabled"
+                if current["enabled"] is True
+                else "V2 activation: disabled or inherited"
+            )
+        else:
+            print(
+                "V2 activation: not inferred by the installer; choose a v2 root "
+                "model such as current Sol or Terra"
+            )
         print(f"Config: {app.config_path}")
         fable_available = True
         if state_matches:
@@ -1225,14 +1398,30 @@ def _status(
                 if isinstance(route, dict) and route.get("kind") == "fable"
             ]
             for route in fable_routes:
+                route_transport = route.get("transport", "claude-code")
+                route_auth_mode = route.get("auth_mode", "subscription")
+                route_api_source = route.get("api_source")
+                if route is advisor:
+                    path = route.get("path") or fable_advisor_path(
+                        route_transport, route_api_source
+                    )
+                    print(f"Advisor path: {FABLE_ADVISOR_PATH_DISPLAY[path]}")
                 try:
-                    verify_fable_prerequisites(route["effort"])
+                    fable_auth = verify_fable_prerequisites(
+                        route_auth_mode,
+                        route_api_source,
+                        route_transport,
+                        app.codex_home,
+                        effort=route["effort"],
+                    )
                 except ConfigurationError as exc:
                     fable_available = False
                     print(f"Claude Fable 5: unavailable — {exc}")
                 else:
                     print(
-                        "Claude Fable 5: ready — first-party login; no model call made"
+                        "Claude Fable 5: ready — configured mode "
+                        f"{fable_auth['auth_mode']}, active path {fable_auth['auth_path']}, "
+                        f"transport {fable_auth['transport']}; no model call made"
                     )
             try:
                 verified = verify_agent_routes(
@@ -1315,6 +1504,36 @@ def _prepare_setup_state(
     current = _current_values(config)
     feature = current["feature"]
     scalar_feature = isinstance(feature, bool)
+    existing_managed = existing_state.get("managed", {}) if existing_state else {}
+    managed_thread_limit = (
+        existing_managed.get("v2_thread_limit")
+        if isinstance(existing_managed, dict)
+        else None
+    )
+    if managed_thread_limit is None and current["legacy_thread_limit"] is not MISSING:
+        legacy_limit = current["legacy_thread_limit"]
+        if (
+            not isinstance(legacy_limit, int)
+            or isinstance(legacy_limit, bool)
+            or legacy_limit < 1
+        ):
+            raise ConfigurationError("agents.max_threads must be a positive integer.")
+        current_v2_limit = current["v2_thread_limit"]
+        if current_v2_limit is MISSING:
+            managed_thread_limit = legacy_limit + 1
+        elif (
+            isinstance(current_v2_limit, int)
+            and not isinstance(current_v2_limit, bool)
+            and current_v2_limit >= 1
+        ):
+            managed_thread_limit = current_v2_limit
+        else:
+            raise ConfigurationError(
+                "features.multi_agent_v2.max_concurrent_threads_per_session "
+                "must be a positive integer."
+            )
+    if managed_thread_limit is None:
+        managed_thread_limit = V2_THREAD_LIMIT
 
     if existing_state is not None:
         if not _managed_matches(existing_state, current):
@@ -1326,6 +1545,13 @@ def _prepare_setup_state(
         if not isinstance(previous, dict):
             raise ConfigurationError("Managed routing state is missing its restore data.")
         previous = dict(previous)
+        # Schema 3 restore data predates activation/thread-limit ownership. Add
+        # snapshots while upgrading the state so disable remains lossless.
+        previous.setdefault("enabled", snapshot(current["enabled"]))
+        previous.setdefault("v2_thread_limit", snapshot(current["v2_thread_limit"]))
+        previous.setdefault(
+            "legacy_thread_limit", snapshot(current["legacy_thread_limit"])
+        )
         scalar_origin = existing_state.get("scalar_origin")
         if isinstance(scalar_origin, bool):
             managed_feature = existing_state.get("managed_feature")
@@ -1350,6 +1576,9 @@ def _prepare_setup_state(
         # string on disable, preserve any user-authored counterpart, and leave
         # unmarked metadata and namespace alone when restore state was lost.
         previous = {
+            "enabled": snapshot(current["enabled"]),
+            "v2_thread_limit": snapshot(current["v2_thread_limit"]),
+            "legacy_thread_limit": snapshot(current["legacy_thread_limit"]),
             "mode": snapshot(MISSING) if recovered_mode else snapshot(current["mode"]),
             "usage": (
                 snapshot(MISSING) if recovered_usage else snapshot(current["usage"])
@@ -1369,7 +1598,8 @@ def _prepare_setup_state(
 
     if scalar_feature and existing_state is None:
         replacement = {
-            "enabled": feature,
+            "enabled": True,
+            "max_concurrent_threads_per_session": managed_thread_limit,
             "hide_spawn_agent_metadata": False,
             "tool_namespace": ROUTING_TOOL_NAMESPACE,
             "multi_agent_mode_hint_text": mode,
@@ -1398,6 +1628,8 @@ def _prepare_setup_state(
         replacement = dict(feature)
         replacement.update(
             {
+                "enabled": True,
+                "max_concurrent_threads_per_session": managed_thread_limit,
                 "hide_spawn_agent_metadata": False,
                 "tool_namespace": ROUTING_TOOL_NAMESPACE,
                 "multi_agent_mode_hint_text": mode,
@@ -1421,6 +1653,16 @@ def _prepare_setup_state(
         managed_feature = replacement
     else:
         edits = [
+            {
+                "keyPath": "features.multi_agent_v2.enabled",
+                "value": True,
+                "mergeStrategy": "replace",
+            },
+            {
+                "keyPath": "features.multi_agent_v2.max_concurrent_threads_per_session",
+                "value": managed_thread_limit,
+                "mergeStrategy": "replace",
+            },
             {
                 "keyPath": "features.multi_agent_v2.hide_spawn_agent_metadata",
                 "value": False,
@@ -1464,9 +1706,35 @@ def _prepare_setup_state(
             )
             if edit is not None
         ]
+        rollback.extend(
+            edit
+            for edit in (
+                snapshot_edit("features.multi_agent_v2.enabled", previous["enabled"]),
+                snapshot_edit(
+                    "features.multi_agent_v2.max_concurrent_threads_per_session",
+                    previous["v2_thread_limit"],
+                ),
+            )
+            if edit is not None
+        )
         managed_feature = None
 
-    existing_managed = existing_state.get("managed", {}) if existing_state else {}
+    # Keep the v2 limit authoritative. A legacy agents.max_threads value is
+    # migrated out of the active config and restored from the snapshot on disable.
+    if current["legacy_thread_limit"] is not MISSING:
+        edits.append(
+            {
+                "keyPath": "agents.max_threads",
+                "value": None,
+                "mergeStrategy": "replace",
+            }
+        )
+        legacy_rollback = snapshot_edit(
+            "agents.max_threads", previous["legacy_thread_limit"]
+        )
+        if legacy_rollback is not None:
+            rollback.append(legacy_rollback)
+
     manage_mcp = (
         any(
             isinstance(route, dict) and route.get("kind") == "fable"
@@ -1521,10 +1789,13 @@ def _prepare_setup_state(
                 rollback.append(rollback_edit)
 
     managed = {
+        "enabled": True,
         "mode": mode,
         "usage": usage,
         "metadata": False,
         "namespace": ROUTING_TOOL_NAMESPACE,
+        "v2_thread_limit": managed_thread_limit,
+        "legacy_thread_limit_removed": True,
     }
     if managed_mcp is not None:
         managed["mcp"] = managed_mcp
@@ -1611,6 +1882,14 @@ def _disable(
                 edit
                 for edit in (
                     snapshot_edit(
+                        "features.multi_agent_v2.enabled",
+                        previous.get("enabled", {"known": False}),
+                    ),
+                    snapshot_edit(
+                        "features.multi_agent_v2.max_concurrent_threads_per_session",
+                        previous.get("v2_thread_limit", {"known": False}),
+                    ),
+                    snapshot_edit(
                         "features.multi_agent_v2.hide_spawn_agent_metadata",
                         previous.get("metadata", {"known": False}),
                     ),
@@ -1629,6 +1908,19 @@ def _disable(
                 )
                 if edit is not None
             ]
+        managed = state.get("managed")
+        if isinstance(managed, dict) and "v2_thread_limit" in managed:
+            saved_legacy = previous.get("legacy_thread_limit", {"known": False})
+            # A known-absent key needs no write when it is still absent. Sending
+            # a delete at this path would materialize an empty ``agents`` table
+            # in App Server implementations that create missing parents.
+            legacy_restore = None
+            if current["legacy_thread_limit"] is not MISSING or saved_legacy.get(
+                "present"
+            ):
+                legacy_restore = snapshot_edit("agents.max_threads", saved_legacy)
+            if legacy_restore is not None:
+                edits.append(legacy_restore)
         previous_mcp = previous.get("mcp")
         if isinstance(previous_mcp, dict):
             edits.extend(
@@ -1759,21 +2051,38 @@ def main() -> int:
             elif args.advisor_agent:
                 advisor = {"kind": "agent", "agent": args.advisor_agent}
             elif args.advisor_fable:
+                advisor_auth_mode = args.advisor_auth_mode or "auto"
+                advisor_transport = args.advisor_transport or "claude-code"
+                fable_auth = verify_fable_prerequisites(
+                    advisor_auth_mode,
+                    args.advisor_api_source,
+                    advisor_transport,
+                    app.codex_home,
+                    effort=normalize_fable_effort(args.advisor_effort),
+                )
                 advisor = {
                     "kind": "fable",
                     "model": FABLE_MODEL,
                     "effort": normalize_fable_effort(args.advisor_effort),
                     "server": fable_server,
+                    "auth_mode": advisor_auth_mode,
+                    "transport": advisor_transport,
+                    "path": fable_advisor_path(
+                        advisor_transport, args.advisor_api_source
+                    ),
                 }
+                if args.advisor_api_source is not None:
+                    advisor["api_source"] = args.advisor_api_source
 
             validate_planning_routes(planner, advisor)
-            fable_efforts = {
-                route["effort"]
-                for route in (planner, advisor)
-                if isinstance(route, dict) and route.get("kind") == "fable"
-            }
-            for effort in sorted(fable_efforts):
-                fable_auth = verify_fable_prerequisites(effort)
+            if isinstance(planner, dict) and planner.get("kind") == "fable":
+                fable_auth = verify_fable_prerequisites(
+                    "subscription",
+                    None,
+                    "claude-code",
+                    app.codex_home,
+                    effort=planner["effort"],
+                )
 
             verified_agents = verify_agent_routes(
                 app.codex_home,
@@ -1809,10 +2118,16 @@ def main() -> int:
                     f"Advisor effort alias: {args.advisor_effort} -> "
                     f"{advisor['effort']} (Claude Code effective value)"
                 )
+            if isinstance(advisor, dict) and advisor.get("kind") == "fable":
+                print(
+                    "Advisor path: "
+                    + FABLE_ADVISOR_PATH_DISPLAY[advisor["path"]]
+                )
             if fable_auth is not None:
                 print(
-                    "Claude Fable 5 login: ready — first-party; "
-                    "setup makes no model call"
+                    "Claude Fable 5 authentication: ready — configured mode "
+                    f"{fable_auth['auth_mode']}, active path {fable_auth['auth_path']}, "
+                    f"transport {fable_auth['transport']}; setup makes no model call"
                 )
             if verified_agents:
                 print(

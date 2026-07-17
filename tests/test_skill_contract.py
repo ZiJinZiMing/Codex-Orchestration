@@ -71,6 +71,7 @@ class SkillContractTests(unittest.TestCase):
 
     def test_native_policy_manages_only_required_fields(self) -> None:
         for field in (
+            "enabled",
             "hide_spawn_agent_metadata",
             "tool_namespace",
             "multi_agent_mode_hint_text",
@@ -80,8 +81,9 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(field, NATIVE_SCRIPT)
         self.assertIn('`tool_namespace = "agents"`', SKILL)
         self.assertIn("reserved `collaboration.spawn_agent` schema", SKILL)
-        self.assertIn("Do not add `enabled = true`", SKILL)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', ROUTING_STATE)
+        self.assertIn("explicitly enables multi-agent v2", SKILL)
+        self.assertIn("ROUTING_TOOL_NAMESPACE,", NATIVE_SCRIPT)
 
     def test_native_config_uses_codex_app_server(self) -> None:
         self.assertIn("Codex App Server's `config/read`", SKILL)
@@ -107,7 +109,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("This policy does not create or change a Goal", NATIVE_SCRIPT)
 
     def test_mixed_client_compatibility_is_capability_detected(self) -> None:
-        self.assertIn("capability-tests the complete four-field preset", SKILL)
+        self.assertIn("capability-tests the complete v2 control preset", SKILL)
         self.assertIn("isolated `CODEX_HOME`", REFERENCE)
         self.assertIn("--allow-incompatible-client", SKILL)
         self.assertIn("Disable must remain available", SKILL)
@@ -166,6 +168,23 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("`create_plan`", SKILL)
         self.assertIn("`revise_plan`", SKILL)
         self.assertIn("`review_plan`", SKILL)
+        self.assertIn("--advisor-transport claude-code", SKILL)
+        self.assertIn("`direct-api` requires one static token or API key", SKILL)
+        self.assertIn("**Claude Code CLI**", SKILL)
+        self.assertIn("**CCSwitch**", SKILL)
+        self.assertIn("**Python API**", SKILL)
+        self.assertIn("configure_fable_api.py --init-default", SKILL)
+        self.assertIn("An empty key disables Python API", SKILL)
+        self.assertIn("zero retries", SKILL)
+        self.assertIn("effort is reported as `configured_effort` but is not sent", SKILL)
+        self.assertIn("cannot prove that an upstream gateway did not remap", SKILL)
+        self.assertIn(
+            "runtime `modelUsage`, after deduplication, to be exactly",
+            SKILL,
+        )
+        self.assertIn('used_models = ["claude-fable-5"]', SKILL)
+        self.assertIn("call the configured MCP server's `review_plan` tool", SKILL)
+        self.assertIn("instead of spawning an advisor child", SKILL)
         self.assertIn("use the exact name `Claude Fable 5`", SKILL)
         self.assertIn("do not expose or restate Claude account-plan metadata", SKILL)
         self.assertIn("MCP requests do not carry caller identity", SKILL)
@@ -175,6 +194,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Direct model overrides keep the root's provider", SKILL)
         self.assertIn("target model is on the same provider", NATIVE_SCRIPT)
         self.assertIn("require a custom agent that pins model_provider", NATIVE_SCRIPT)
+        self.assertIn('model = \\"claude-fable-5\\"', NATIVE_SCRIPT)
+        self.assertIn('used_models = [\\"claude-fable-5\\"]', NATIVE_SCRIPT)
+        self.assertIn("do not release executor work", NATIVE_SCRIPT)
 
     def test_advisor_is_bounded_root_only_and_failure_is_not_approval(self) -> None:
         self.assertIn("PLAN_APPROVED", SKILL)

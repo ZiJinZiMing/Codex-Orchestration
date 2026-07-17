@@ -22,8 +22,12 @@ FABLE_SERVERS = frozenset(
         "fable-advisor-py",
     }
 )
+FABLE_AUTH_MODES = frozenset({"subscription", "api", "auto"})
+FABLE_API_SOURCES = frozenset({"config-file", "environment", "user-settings"})
+FABLE_TRANSPORTS = frozenset({"claude-code", "direct-api"})
+FABLE_ADVISOR_PATHS = frozenset({"claude-code-cli", "ccswitch", "python-api"})
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3}
+_SCHEMA_POLICY_PAIRS = frozenset({(1, 1), (2, 2), (3, 2), (3, 3), (4, 4)})
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -89,7 +93,19 @@ def _validate_snapshot(value: Any, expected_type: type) -> None:
         )
 
 
-def _validate_route(route: Any, *, seat: str, schema: int) -> str:
+def _fable_advisor_path(transport: str, api_source: str | None) -> str:
+    if transport == "claude-code":
+        return "claude-code-cli"
+    if transport == "direct-api" and api_source == "user-settings":
+        return "ccswitch"
+    if transport == "direct-api" and api_source in {"config-file", "environment"}:
+        return "python-api"
+    raise RoutingStateError("Fable advisor path is invalid")
+
+
+def _validate_route(
+    route: Any, *, seat: str, schema: int, policy_version: int
+) -> str:
     _require(type(route) is dict, f"{seat} route must be an object")
     kind = route.get("kind")
     _require(type(kind) is str, f"{seat} route kind must be a string")
@@ -119,11 +135,22 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
         )
     elif kind == "fable":
         _require(
-            seat in {"planner", "advisor"} and schema >= 2,
+            seat in {"planner", "advisor"}
+            and schema >= 2
+            and not (seat == "planner" and (schema, policy_version) != (3, 3) and schema != 4),
             f"{seat} cannot use Fable in schema {schema}",
         )
+        base_keys = {"kind", "model", "effort", "server"}
+        supports_direct_metadata = seat == "advisor" and (
+            (schema, policy_version) == (3, 2) or schema == 4
+        )
+        expected_keys = set(base_keys)
+        if supports_direct_metadata:
+            expected_keys.update({"auth_mode", "transport", "path"})
+            if route.get("auth_mode") == "api":
+                expected_keys.add("api_source")
         _require(
-            set(route) == {"kind", "model", "effort", "server"},
+            set(route) == expected_keys,
             f"{seat} Fable route has the wrong shape",
         )
         _require(route["model"] == FABLE_MODEL, "Fable model is not pinned")
@@ -135,6 +162,41 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             type(route["server"]) is str and route["server"] in FABLE_SERVERS,
             "Fable server is unsupported",
         )
+        if supports_direct_metadata:
+            auth_mode = route["auth_mode"]
+            transport = route["transport"]
+            api_source = route.get("api_source")
+            _require(
+                type(auth_mode) is str and auth_mode in FABLE_AUTH_MODES,
+                "Fable auth mode is unsupported",
+            )
+            _require(
+                type(transport) is str and transport in FABLE_TRANSPORTS,
+                "Fable transport is unsupported",
+            )
+            _require(
+                (
+                    auth_mode == "api"
+                    and type(api_source) is str
+                    and api_source in FABLE_API_SOURCES
+                )
+                or (auth_mode != "api" and api_source is None),
+                "Fable API source does not match authentication mode",
+            )
+            _require(
+                transport != "direct-api" or auth_mode == "api",
+                "Fable direct API requires API authentication",
+            )
+            _require(
+                api_source != "config-file" or transport == "direct-api",
+                "Fable config-file source requires direct API",
+            )
+            _require(
+                type(route["path"]) is str
+                and route["path"] in FABLE_ADVISOR_PATHS
+                and route["path"] == _fable_advisor_path(transport, api_source),
+                "Fable advisor path does not match its transport and source",
+            )
     else:
         raise RoutingStateError(f"{seat} route kind is unsupported")
     return kind
@@ -155,7 +217,9 @@ def _validate_route_separation(planner: Any, advisor: Any) -> None:
     _require(not same_route, "Planner and Advisor routes are not independent")
 
 
-def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) -> None:
+def _validate_scalar_conversion(
+    state: dict[str, Any], managed: dict[str, Any], *, explicit_v2: bool
+) -> None:
     scalar_origin = state["scalar_origin"]
     managed_feature = state["managed_feature"]
     if scalar_origin is None:
@@ -164,20 +228,19 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
     _require(type(scalar_origin) is bool, "scalar origin must be null or boolean")
     _require(type(managed_feature) is dict, "scalar conversion must save a table")
-    _require(
-        set(managed_feature)
-        == {
-            "enabled",
-            "hide_spawn_agent_metadata",
-            "tool_namespace",
-            "multi_agent_mode_hint_text",
-            "usage_hint_text",
-        },
-        "managed scalar conversion table has the wrong shape",
-    )
+    expected_feature = {
+        "enabled",
+        "hide_spawn_agent_metadata",
+        "tool_namespace",
+        "multi_agent_mode_hint_text",
+        "usage_hint_text",
+    }
+    if "v2_thread_limit" in managed:
+        expected_feature.add("max_concurrent_threads_per_session")
+    _require(set(managed_feature) == expected_feature, "managed scalar conversion table has the wrong shape")
     _require(
         type(managed_feature["enabled"]) is bool
-        and managed_feature["enabled"] is scalar_origin,
+        and managed_feature["enabled"] is (True if explicit_v2 else scalar_origin),
         "managed scalar conversion enabled value is forged",
     )
     _require(
@@ -200,10 +263,16 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
         and managed_feature["usage_hint_text"] == managed["usage"],
         "managed scalar conversion usage is forged",
     )
+    if "v2_thread_limit" in managed:
+        _require(
+            managed_feature["max_concurrent_threads_per_session"]
+            == managed["v2_thread_limit"],
+            "managed scalar conversion thread limit is forged",
+        )
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1, 2, or 3.
+    """Validate and return one exact, complete persisted supported schema.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -213,17 +282,17 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     schema = value.get("schema")
     policy_version = value.get("policy_version")
     _require(
-        type(schema) is int and schema in _SCHEMA_POLICY_PAIRS,
+        type(schema) is int and any(schema == pair[0] for pair in _SCHEMA_POLICY_PAIRS),
         "schema must be an exact supported integer",
     )
     _require(
         type(policy_version) is int
-        and policy_version == _SCHEMA_POLICY_PAIRS[schema],
+        and (schema, policy_version) in _SCHEMA_POLICY_PAIRS,
         "policy version does not match schema",
     )
 
     expected_top = set(_BASE_TOP_LEVEL_KEYS)
-    if schema == 3:
+    if (schema, policy_version) in {(3, 3), (4, 4)}:
         expected_top.add("planner")
     _require(set(value) == expected_top, "top-level state shape is unsupported")
     _require(value["managed_by"] == "codex-orchestration", "state owner is invalid")
@@ -234,13 +303,19 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         "config path is invalid",
     )
 
-    _validate_route(value["executor"], seat="executor", schema=schema)
+    _validate_route(
+        value["executor"], seat="executor", schema=schema, policy_version=policy_version
+    )
     planner = value.get("planner")
     advisor = value["advisor"]
     if planner is not None:
-        _validate_route(planner, seat="planner", schema=schema)
+        _validate_route(
+            planner, seat="planner", schema=schema, policy_version=policy_version
+        )
     if advisor is not None:
-        _validate_route(advisor, seat="advisor", schema=schema)
+        _validate_route(
+            advisor, seat="advisor", schema=schema, policy_version=policy_version
+        )
     _validate_route_separation(planner, advisor)
 
     managed = value["managed"]
@@ -254,6 +329,31 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
 
     expected_managed = set(_BASE_MANAGED_KEYS)
     expected_previous = set(_BASE_PREVIOUS_KEYS)
+    explicit_v2 = (schema, policy_version) in {(3, 2), (4, 4)}
+    if explicit_v2:
+        expected_managed.add("enabled")
+        expected_previous.add("enabled")
+        _require(managed.get("enabled") is True, "managed v2 activation must be true")
+        _validate_snapshot(previous.get("enabled"), bool)
+        has_thread_limit = "v2_thread_limit" in managed
+        _require(
+            has_thread_limit == ("legacy_thread_limit_removed" in managed),
+            "managed thread-limit migration fields must pair",
+        )
+        if has_thread_limit:
+            expected_managed.update({"v2_thread_limit", "legacy_thread_limit_removed"})
+            expected_previous.update({"v2_thread_limit", "legacy_thread_limit"})
+            _require(
+                type(managed["v2_thread_limit"]) is int
+                and managed["v2_thread_limit"] >= 1,
+                "managed v2 thread limit is invalid",
+            )
+            _require(
+                managed["legacy_thread_limit_removed"] is True,
+                "legacy thread limit removal marker is invalid",
+            )
+            _validate_snapshot(previous.get("v2_thread_limit"), int)
+            _validate_snapshot(previous.get("legacy_thread_limit"), int)
     if managed_has_mcp:
         expected_managed.add("mcp")
         expected_previous.add("mcp")
@@ -310,5 +410,5 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     else:
         _require(not true_servers, "MCP state enables a launcher without a Fable seat")
 
-    _validate_scalar_conversion(value, managed)
+    _validate_scalar_conversion(value, managed, explicit_v2=explicit_v2)
     return value

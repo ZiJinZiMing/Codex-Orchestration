@@ -3,7 +3,7 @@
 
 A disposable bare Git marketplace is served over loopback HTTP. The real Codex
 CLI installs the affected Advisor-only 0.5.0 bundle, runs its documented
-marketplace-upgrade command after 0.5.1 is pushed to that Git remote, installs
+marketplace-upgrade command after 0.5.2 is pushed to that Git remote, installs
 the refreshed package, verifies the new cache and Planner contract, and runs
 native-policy plus custom-agent setup/status/cleanup in isolation.
 """
@@ -31,7 +31,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.5.1"
+NEW_VERSION = "0.5.2"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -197,8 +197,9 @@ def serve_git(root: Path) -> Iterator[str]:
             raise SmokeFailure("Loopback Git server did not stop cleanly")
 
 
-def write_fake_codex(path: Path) -> None:
-    path.write_text(
+def write_fake_codex(path: Path) -> Path:
+    script = path.with_suffix(".py") if os.name == "nt" else path
+    script.write_text(
         """#!/usr/bin/env python3
 import json
 import sys
@@ -222,7 +223,15 @@ raise SystemExit(2)
 """,
         encoding="utf-8",
     )
-    path.chmod(0o755)
+    script.chmod(0o755)
+    if os.name == "nt":
+        launcher = path.with_suffix(".cmd")
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+        )
+        return launcher
+    return script
 
 
 def installed_entry(payload: dict[str, Any]) -> dict[str, Any]:
@@ -264,7 +273,10 @@ def main() -> int:
         current_version.split("+", 1)[0], NEW_VERSION, "checkout release base version"
     )
 
-    with tempfile.TemporaryDirectory(prefix="codex-orchestration-lifecycle-") as raw:
+    with tempfile.TemporaryDirectory(
+        prefix="codex-orchestration-lifecycle-",
+        ignore_cleanup_errors=os.name == "nt",
+    ) as raw:
         temp = Path(raw)
         publisher = temp / "publisher"
         web_root = temp / "www"
@@ -502,7 +514,7 @@ def main() -> int:
             installed_root = Path(new_install["installedPath"]).resolve()
             if installed_root == old_installed_root:
                 raise SmokeFailure(
-                    "0.5.1 reused the Advisor-only 0.5.0 cache directory"
+                    "0.5.2 reused the Advisor-only 0.5.0 cache directory"
                 )
             assert_equal(
                 file_tree(installed_root),
@@ -590,8 +602,7 @@ def main() -> int:
                 env=env,
             )
 
-            fake_codex = temp / "fake-codex"
-            write_fake_codex(fake_codex)
+            fake_codex = write_fake_codex(temp / "fake-codex")
             configurator = (
                 installed_root
                 / "skills"
@@ -731,9 +742,29 @@ def main() -> int:
             remove_preview = run(remove_roles_command, cwd=project, env=env)
             if "Dry run only" not in remove_preview.stdout or not executor_file.exists():
                 raise SmokeFailure("Saved-role removal preview was not non-mutating")
-            run([*remove_roles_command, "--apply"], cwd=project, env=env)
-            if executor_file.exists():
-                raise SmokeFailure("Managed executor remained after saved-role removal")
+            if os.name == "nt":
+                blocked_remove = subprocess.run(
+                    [*remove_roles_command, "--apply"],
+                    cwd=project,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=COMMAND_TIMEOUT_SECONDS,
+                )
+                blocked_output = blocked_remove.stderr + blocked_remove.stdout
+                if (
+                    blocked_remove.returncode != 2
+                    or "disabled on Windows" not in blocked_output
+                    or not executor_file.exists()
+                ):
+                    raise SmokeFailure(
+                        "Windows saved-role removal did not fail closed as documented"
+                    )
+            else:
+                run([*remove_roles_command, "--apply"], cwd=project, env=env)
+                if executor_file.exists():
+                    raise SmokeFailure("Managed executor remained after saved-role removal")
 
             run_json(
                 [codex, "plugin", "remove", PLUGIN_ID, "--json"],
