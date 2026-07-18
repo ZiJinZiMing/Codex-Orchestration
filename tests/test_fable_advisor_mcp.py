@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -884,7 +885,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             body,
             {
                 "model": "claude-fable-5",
-                "max_tokens": 131072,
+                "max_tokens": 65536,
                 "system": FABLE.SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": "complete packet"}],
             },
@@ -1422,6 +1423,37 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 self.assertNotIn("evil.invalid", message)
                 self.assertNotIn("Location", message)
                 opener.open.assert_called_once()
+
+    def test_direct_api_rate_limit_diagnostics_are_bounded_and_secret_safe(self) -> None:
+        self.set_direct_route()
+        self.write_user_api_settings(
+            ANTHROPIC_AUTH_TOKEN="secret-token",
+            ANTHROPIC_BASE_URL="http://127.0.0.1:15721",
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = FABLE.urllib_error.HTTPError(
+            "https://secret-token@example.invalid/path",
+            429,
+            "rate limited secret-token",
+            {"Retry-After": "7", "X-Secret": "secret-token"},
+            io.BytesIO(
+                b'{"error":{"type":"rate_limit_error","message":"secret-token"}}'
+            ),
+        )
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}, clear=True),
+            mock.patch.object(
+                FABLE.urllib_request, "build_opener", return_value=opener
+            ),
+            self.assertRaises(FABLE.AdvisorError) as caught,
+        ):
+            FABLE.review_plan("packet")
+
+        message = str(caught.exception)
+        self.assertIn("HTTP status 429", message)
+        self.assertIn("retry_after_seconds=7", message)
+        self.assertIn("provider_error_type=rate_limit_error", message)
+        self.assertNotIn("secret-token", message)
 
         for code in (301, 302, 303, 305, 307, 308):
             with self.subTest(handler_code=code):

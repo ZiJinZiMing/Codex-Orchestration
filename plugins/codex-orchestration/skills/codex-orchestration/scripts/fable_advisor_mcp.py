@@ -51,7 +51,7 @@ TRANSPORTS = {"claude-code", "direct-api"}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 DIRECT_API_TIMEOUT_SECONDS = 600
-DIRECT_API_MAX_TOKENS = 131072
+DIRECT_API_MAX_TOKENS = 65536
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -122,6 +122,37 @@ def _safe_refusal_field(value: Any, max_chars: int = 512) -> str | None:
     if not cleaned:
         return None
     return cleaned[:max_chars]
+
+
+def _safe_http_error_type(value: Any) -> str | None:
+    """Return only a short machine-readable provider error type."""
+    if not isinstance(value, str) or not value or len(value) > 96:
+        return None
+    if not all(char.isascii() and (char.isalnum() or char in "._-") for char in value):
+        return None
+    return value
+
+
+def _safe_http_error_diagnostics(exc: urllib_error.HTTPError) -> str:
+    """Expose bounded rate-limit metadata without leaking provider response text."""
+    details: list[str] = []
+    headers = exc.headers
+    retry_after = headers.get("Retry-After") if headers is not None else None
+    if isinstance(retry_after, str) and retry_after.strip().isdigit():
+        details.append(f"retry_after_seconds={retry_after.strip()}")
+    try:
+        raw = exc.read(4096)
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        error_type = _safe_http_error_type(
+            error.get("type") if isinstance(error, dict) else None
+        )
+        if error_type is not None:
+            details.append(f"provider_error_type={error_type}")
+    return "; " + "; ".join(details) if details else ""
 
 
 class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
@@ -995,8 +1026,11 @@ def _review_plan_direct_api(
             raw = response.read()
     except urllib_error.HTTPError as exc:
         status = exc.code if isinstance(exc.code, int) else "unknown"
+        diagnostics = _safe_http_error_diagnostics(exc)
         exc.close()
-        raise AdvisorError(f"Direct API request failed with HTTP status {status}.") from None
+        raise AdvisorError(
+            f"Direct API request failed with HTTP status {status}.{diagnostics}"
+        ) from None
     except (TimeoutError, urllib_error.URLError, OSError):
         raise AdvisorError("Direct API request failed due to a network or timeout error.") from None
     try:

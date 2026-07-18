@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.5.4",
+  "version": "0.5.4+codex.20260719074630",
   "description": "Bring models like Claude Fable 5 into Codex as Planner, Advisor, or Executor.",
   "author": {
     "name": "CJ Zafir",
