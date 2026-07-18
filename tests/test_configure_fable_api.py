@@ -166,7 +166,16 @@ class ConfigureFableApiTests(unittest.TestCase):
     @unittest.skipUnless(os.name != "nt", "POSIX file mode semantics")
     def test_atomic_write_sets_private_mode(self) -> None:
         result, _, error = self.run_main(
-            ["--credential-stdin"], stdin="mode-secret\n"
+            [
+                "--api-url",
+                FABLE.DEFAULT_API_URL,
+                "--model",
+                FABLE.DEFAULT_MODEL,
+                "--auth-type",
+                FABLE.DEFAULT_AUTH_TYPE,
+                "--credential-stdin",
+            ],
+            stdin="mode-secret\n",
         )
         self.assertEqual(result, 0, error)
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)

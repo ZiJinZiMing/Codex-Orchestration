@@ -724,7 +724,10 @@ def _review_plan_direct_api(
         headers=headers,
         method="POST",
     )
-    opener = urllib_request.build_opener(NoRedirectHandler())
+    handlers: list[Any] = [NoRedirectHandler()]
+    if urllib_parse.urlsplit(endpoint).hostname in LOCAL_HTTP_HOSTS:
+        handlers.insert(0, urllib_request.ProxyHandler({}))
+    opener = urllib_request.build_opener(*handlers)
     try:
         with opener.open(request, timeout=DIRECT_API_TIMEOUT_SECONDS) as response:
             status = response.getcode()

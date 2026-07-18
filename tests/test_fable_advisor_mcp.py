@@ -321,7 +321,9 @@ class FableAdvisorMcpTests(unittest.TestCase):
         opener.open.return_value = response
         with (
             mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}, clear=True),
-            mock.patch.object(FABLE.urllib_request, "build_opener", return_value=opener),
+            mock.patch.object(
+                FABLE.urllib_request, "build_opener", return_value=opener
+            ) as build_opener,
             mock.patch.object(FABLE, "resolve_claude") as resolve_claude,
             mock.patch.object(FABLE.subprocess, "run") as run,
         ):
@@ -339,6 +341,14 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.assertEqual(result["configured_effort"], "max")
         resolve_claude.assert_not_called()
         run.assert_not_called()
+        handlers = build_opener.call_args.args
+        proxy_handlers = [
+            handler
+            for handler in handlers
+            if isinstance(handler, FABLE.urllib_request.ProxyHandler)
+        ]
+        self.assertEqual(len(proxy_handlers), 1)
+        self.assertEqual(proxy_handlers[0].proxies, {})
         opener.open.assert_called_once()
         request = opener.open.call_args.args[0]
         self.assertEqual(request.full_url, "http://127.0.0.1:15721/v1/messages")
@@ -363,6 +373,32 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertNotIn("effort", body)
         self.assertNotIn("output_config", body)
+
+    def test_direct_api_remote_endpoint_keeps_default_proxy_handling(self) -> None:
+        self.set_direct_route("config-file")
+        self.write_python_api_provider(api_key="provider-secret")
+        opener = mock.Mock()
+        opener.open.return_value = FakeHttpResponse(
+            {
+                "model": "anthropic/claude-fable-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "PLAN_APPROVED"}],
+            }
+        )
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}, clear=True),
+            mock.patch.object(
+                FABLE.urllib_request, "build_opener", return_value=opener
+            ) as build_opener,
+        ):
+            FABLE.review_plan("packet")
+
+        self.assertFalse(
+            any(
+                isinstance(handler, FABLE.urllib_request.ProxyHandler)
+                for handler in build_opener.call_args.args
+            )
+        )
 
     def test_config_file_direct_api_is_isolated_from_all_other_sources(self) -> None:
         self.set_direct_route("config-file")
