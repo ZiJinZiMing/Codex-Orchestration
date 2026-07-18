@@ -2,9 +2,10 @@
 """Exercise a real Codex plugin install, Git upgrade, and both setup routes.
 
 A disposable bare Git marketplace is served over loopback HTTP. The real Codex
-CLI installs 0.3.0, runs its documented marketplace-upgrade command after 0.5.0
-is pushed to that Git remote, installs the refreshed package, verifies its cache,
-and runs native-policy plus custom-agent setup/status/cleanup in isolation.
+CLI installs the affected Advisor-only 0.5.0 bundle, runs its documented
+marketplace-upgrade command after 0.5.3 is pushed to that Git remote, installs
+the refreshed package, verifies the new cache and Planner contract, and runs
+native-policy plus custom-agent setup/status/cleanup in isolation.
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "codex-orchestration"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
-OLD_RELEASE = "d93b86e735a12a9fefcfd35b0b35199ce3e9a2a7"
-OLD_VERSION = "0.3.0"
-NEW_VERSION = "0.5.0"
+OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
+OLD_VERSION = "0.5.0"
+NEW_VERSION = "0.5.3"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -77,6 +78,64 @@ def run_json(
         raise SmokeFailure(
             f"Command did not return JSON: {command!r}\n{completed.stdout}"
         ) from exc
+
+
+def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> None:
+    requests = "\n".join(
+        json.dumps(request)
+        for request in (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "lifecycle-smoke", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+    ) + "\n"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=cwd,
+            env=env,
+            input=requests,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SmokeFailure(f"Installed Fable MCP subprocess failed: {exc}") from exc
+    if completed.returncode != 0:
+        raise SmokeFailure(
+            "Installed Fable MCP subprocess did not shut down cleanly: "
+            f"exit {completed.returncode}; {completed.stderr.strip()}"
+        )
+    try:
+        responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    except json.JSONDecodeError as exc:
+        raise SmokeFailure("Installed Fable MCP returned malformed JSON-RPC") from exc
+    if len(responses) != 2 or [response.get("id") for response in responses] != [1, 2]:
+        raise SmokeFailure(f"Installed Fable MCP returned unexpected responses: {responses!r}")
+    server_info = responses[0].get("result", {}).get("serverInfo", {})
+    assert_equal(
+        server_info.get("name"),
+        "codex-orchestration-fable-advisor",
+        "installed Fable MCP server identity",
+    )
+    tools = responses[1].get("result", {}).get("tools", [])
+    tool_names = {
+        tool.get("name") for tool in tools if isinstance(tool, dict)
+    }
+    assert_equal(
+        tool_names,
+        {"create_plan", "revise_plan", "review_plan", "status"},
+        "installed Fable MCP tool list",
+    )
 
 
 def assert_equal(actual: Any, expected: Any, message: str) -> None:
@@ -138,8 +197,9 @@ def serve_git(root: Path) -> Iterator[str]:
             raise SmokeFailure("Loopback Git server did not stop cleanly")
 
 
-def write_fake_codex(path: Path) -> None:
-    path.write_text(
+def write_fake_codex(path: Path) -> Path:
+    script = path.with_suffix(".py") if os.name == "nt" else path
+    script.write_text(
         """#!/usr/bin/env python3
 import json
 import sys
@@ -163,7 +223,15 @@ raise SystemExit(2)
 """,
         encoding="utf-8",
     )
-    path.chmod(0o755)
+    script.chmod(0o755)
+    if os.name == "nt":
+        launcher = path.with_suffix(".cmd")
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+        )
+        return launcher
+    return script
 
 
 def installed_entry(payload: dict[str, Any]) -> dict[str, Any]:
@@ -205,7 +273,10 @@ def main() -> int:
         current_version.split("+", 1)[0], NEW_VERSION, "checkout release base version"
     )
 
-    with tempfile.TemporaryDirectory(prefix="codex-orchestration-lifecycle-") as raw:
+    with tempfile.TemporaryDirectory(
+        prefix="codex-orchestration-lifecycle-",
+        ignore_cleanup_errors=os.name == "nt",
+    ) as raw:
         temp = Path(raw)
         publisher = temp / "publisher"
         web_root = temp / "www"
@@ -313,6 +384,17 @@ def main() -> int:
             assert_equal(
                 old_install.get("version"), OLD_VERSION, "initial install version"
             )
+            old_installed_root = Path(old_install["installedPath"]).resolve()
+            old_skill = (
+                old_installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            if "setup planner: Claude Fable 5 High" in old_skill:
+                raise SmokeFailure("old Advisor-only cache unexpectedly supports Planner")
+            if "built-in advisor label" not in old_skill:
+                raise SmokeFailure("old release fixture is not the affected Advisor-only cache")
 
             old_discovery = run_json(
                 [codex, "plugin", "list", "--json"], cwd=project, env=env
@@ -417,13 +499,49 @@ def main() -> int:
                 entry.get("version"), current_version, "discovered new version"
             )
             assert_equal(entry.get("enabled"), True, "new plugin enabled state")
+            refreshed_source = entry.get("marketplaceSource") or {}
+            assert_equal(
+                refreshed_source.get("sourceType"),
+                "git",
+                "refreshed marketplace source type",
+            )
+            assert_equal(
+                refreshed_source.get("source"),
+                marketplace_url,
+                "refreshed marketplace URL",
+            )
 
             installed_root = Path(new_install["installedPath"]).resolve()
+            if installed_root == old_installed_root:
+                raise SmokeFailure(
+                    "0.5.3 reused the Advisor-only 0.5.0 cache directory"
+                )
             assert_equal(
                 file_tree(installed_root),
                 file_tree(PLUGIN_ROOT),
                 "installed package contents",
             )
+            installed_skill = (
+                installed_root / "skills" / "codex-orchestration" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            for expected in (
+                "Explicit seat labels are authoritative",
+                "never reinterpret a supplied `planner:` model as an Advisor",
+                "Fable Planner uses `create_plan` and `revise_plan`",
+            ):
+                if expected not in installed_skill:
+                    raise SmokeFailure(
+                        f"Upgraded installed skill is missing Planner contract {expected!r}"
+                    )
+
+            installed_fable_mcp = (
+                installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "scripts"
+                / "fable_advisor_mcp.py"
+            )
+            probe_mcp_subprocess(installed_fable_mcp, cwd=project, env=env)
 
             native_configurator = (
                 installed_root
@@ -484,8 +602,7 @@ def main() -> int:
                 env=env,
             )
 
-            fake_codex = temp / "fake-codex"
-            write_fake_codex(fake_codex)
+            fake_codex = write_fake_codex(temp / "fake-codex")
             configurator = (
                 installed_root
                 / "skills"
@@ -625,9 +742,29 @@ def main() -> int:
             remove_preview = run(remove_roles_command, cwd=project, env=env)
             if "Dry run only" not in remove_preview.stdout or not executor_file.exists():
                 raise SmokeFailure("Saved-role removal preview was not non-mutating")
-            run([*remove_roles_command, "--apply"], cwd=project, env=env)
-            if executor_file.exists():
-                raise SmokeFailure("Managed executor remained after saved-role removal")
+            if os.name == "nt":
+                blocked_remove = subprocess.run(
+                    [*remove_roles_command, "--apply"],
+                    cwd=project,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=COMMAND_TIMEOUT_SECONDS,
+                )
+                blocked_output = blocked_remove.stderr + blocked_remove.stdout
+                if (
+                    blocked_remove.returncode != 2
+                    or "disabled on Windows" not in blocked_output
+                    or not executor_file.exists()
+                ):
+                    raise SmokeFailure(
+                        "Windows saved-role removal did not fail closed as documented"
+                    )
+            else:
+                run([*remove_roles_command, "--apply"], cwd=project, env=env)
+                if executor_file.exists():
+                    raise SmokeFailure("Managed executor remained after saved-role removal")
 
             run_json(
                 [codex, "plugin", "remove", PLUGIN_ID, "--json"],

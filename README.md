@@ -1,60 +1,60 @@
 # Codex Orchestration
 
-Bring models like Claude Fable 5 into Codex, give them roles, and make them work together.
+Bring models like Claude Fable 5 into Codex, give each model a role, and let Codex coordinate the work.
 
-## What does it do?
+## What is it?
 
-Codex Orchestration turns one Codex task into a multi-model workflow.
+Codex Orchestration adds three simple roles to a Codex task:
 
-- Bring Fable 5 or another compatible model into Codex.
-- Assign roles such as advisor, executor, researcher, writer, designer, or reviewer.
-- Choose the order in which those roles work.
-- Let Codex manage the handoffs and return one verified result.
+- **Planner** creates the plan and improves it after feedback. It is optional; when omitted, your current Codex model plans.
+- **Advisor** reviews the plan, finds important gaps, and approves it when it is ready. It is optional.
+- **Executor** implements the approved plan. It is required for setup.
 
-The model selected for the task stays in charge. It plans, decides what feedback to use, delegates work, tests the result, and gives you the final answer.
+The model selected for the Codex task remains in charge. It passes work between the roles, checks every result, and gives you the final answer.
 
 ## How it works
 
-Here is one example:
-
 ```text
-                 YOUR TASK OR GOAL
-                         |
-                         v
-              SOL — ROOT ORCHESTRATOR
-                    creates the plan
-                         |
-                         v
-              FABLE 5 — PLAN ADVISOR
-                 finds gaps and risks
-                         |
-                         v
-              SOL — ROOT ORCHESTRATOR
-             improves the plan and decides
-                         |
-              +----------+----------+
-              |                     |
-              v                     v
-       LUNA EXECUTOR 1        LUNA EXECUTOR 2
-          builds a part          builds a part
-              |                     |
-              +----------+----------+
-                         |
-                         v
-              SOL — ROOT ORCHESTRATOR
-                 tests and delivers
+                         YOUR TASK
+                             |
+                             v
+                  CODEX COORDINATES THE WORK
+                             |
+                             v
+               PLANNER CREATES THE FIRST PLAN
+              Fable 5, another model, or Codex
+                             |
+                             v
+                    ADVISOR REVIEWS IT
+                       finds real gaps
+                             |
+                   needs work? -- yes --+
+                             |            |
+                            no            v
+                             |      PLANNER IMPROVES IT
+                             |            |
+                             +<-----------+
+                             |
+                       PLAN APPROVED
+                             |
+                             v
+                  EXECUTORS IMPLEMENT IT
+                             |
+                             v
+                    CODEX TESTS & DELIVERS
 ```
 
-You choose the models, roles, and order. Codex follows the workflow while keeping final decisions with the root model.
+Planner and Advisor can work through several revisions. Codex stops as soon as the Advisor returns `PLAN_APPROVED`, with a safety limit of five reviews. If approval is not reached, execution stops and Codex shows you the latest plan and unresolved issues.
 
 ## Why use it?
 
-- **Better plans:** Fable 5 can challenge the root model before implementation begins.
-- **More perspectives:** use different models for planning, research, design, writing, review, or execution.
-- **Faster implementation:** independent executors can work in parallel—up to 2x faster on suitable tasks.
-- **Less limit pressure:** move repeated implementation work away from the root model and potentially hit premium-model limits about 40% less often.
+- Bring Fable 5 or another compatible model into Codex.
+- Use different models for planning, review, and implementation.
+- Get a stronger plan before code changes begin.
+- Run independent implementation work in parallel—up to 2x faster on suitable tasks.
+- Move repeatable work away from the root model and potentially hit premium-model limits about 40% less often.
 
-Results depend on the models, task, context, retries, and how much work can run in parallel. The speed and limit figures are targets, not guarantees.
+Results depend on the models, task, context, retries, and available parallel work. The speed and limit figures are targets, not guarantees.
 
 ## Install
 
@@ -63,23 +63,23 @@ codex plugin marketplace add Cjbuilds/Codex-Orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Start a new Codex task after installation so the plugin loads.
+Start a new Codex task after installation. Setup requires Python 3.11 or newer.
 
-Setup requires Python 3.11 or newer.
+## Quick start
 
-## Quick start with Fable 5
-
-Select the model you want to lead the task, then run:
+Use Fable 5 to plan, Sol to advise, and Luna to implement:
 
 ```text
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
+/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 ```
 
-This creates the default workflow:
+Or let your current Codex model plan and use Fable 5 only as Advisor:
 
 ```text
-Selected Codex model -> Fable 5 review -> selected model decides -> Luna executes -> selected model verifies
+/codex-orchestration setup advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
 ```
+
+After setup, start another new task and use Codex normally. The saved workflow applies automatically.
 
 Claude Fable 5 has three explicit advisor paths. The selected path is saved in routing state and printed by setup and status; paths never fall back to each other.
 
@@ -153,84 +153,76 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 
 Plugin installation itself has no secure interactive credential hook. Python API setup refuses to continue until the provider file exists and has a non-empty key. Runtime reloads and validates the selected source for every review; missing, disabled, or invalid configuration fails closed without consulting Claude settings, CCSwitch, environment variables, or another path.
 
-After setup, start another new task and work normally.
+Fable defaults to **High**. With the Claude Code transport you can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**; **Ultra** is accepted as an alias for Max. Direct API records the configured effort for reporting but does not send or apply it.
 
-## Tell Codex your workflow
+Fable 5 can use the official Claude Code CLI with a compatible first-party login, or an explicitly selected direct API source. With the subscription path you do not need to add an Anthropic API key to Codex. Credentials remain in the selected source and are never copied into Codex routing state.
 
-Paste a workflow at the start of a task:
+## Choose your roles
 
 ```text
-Use this workflow:
-
-1. The selected model is the root orchestrator and creates the plan.
-2. Claude Fable 5 reviews the plan as advisor.
-3. The root accepts only useful feedback and improves the plan.
-4. Luna executors build independent parts in parallel.
-5. The root integrates, tests, and verifies the final result.
+/codex-orchestration setup planner: <model and effort>, advisor: <model and effort>, executor: <model and effort>
 ```
 
-You can change the sequence for any task:
+- Omit `planner` to use the current Codex model as Planner.
+- Omit `advisor` when you do not want plan review.
+- `executor` is required.
+- Planner and Advisor must use different configured model routes so the review is independent.
+
+Role labels are literal. A model after `planner:` plans; a model after `advisor:` reviews; a model after `executor:` implements. Codex must never move a model to a different role because that model was used differently in an older plugin version. If you specify Planner and Executor but omit Advisor, the workflow has no Advisor.
+
+Examples:
 
 ```text
-Researcher -> root synthesis -> designer -> writer -> reviewer -> root verification
+/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+
+/codex-orchestration setup planner: GPT-5.6 Sol Extra High, advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
+
+/codex-orchestration setup executor: GPT-5.6 Luna Extra High
 ```
 
 ## Bring another model into Codex
 
-Ask Codex Orchestration to create a role:
+Models already available through Codex on the current provider can be assigned directly. Other models must already be available through Codex via an existing authenticated, compatible provider and a Codex custom-agent role. In all cases, cross-provider routing requires an authenticated, compatible provider.
+
+Ask the plugin to create a project or personal role:
 
 ```text
-/codex-orchestration create these project roles:
-
-- researcher
-  model: <model-id>
-  provider: <configured-provider-id>
-  effort: high
-  job: gather evidence and cite sources
-
-- writer
-  model: <model-id>
-  effort: medium
-  job: turn approved research into a clear draft
-
-- designer
-  model: <model-id>
-  effort: high
-  job: propose and review the user experience
+/codex-orchestration create project role:
+name: researcher
+model: <exact-model-id>
+provider: <configured-provider-id>
+effort: high
+job: gather evidence and cite sources
 ```
 
-Codex previews the role files before creating them. Project roles live in `.codex/agents/`. Personal roles live in `~/.codex/agents/` and can be used across projects.
+For several roles at once, start with `/codex-orchestration create these project roles:` and list each bounded role specification.
 
-Fable 5 is currently bundled as a plan advisor. Other models must already be available through Codex or an authenticated, compatible provider.
+Project roles live in `.codex/agents/`. Personal roles live in `~/.codex/agents/` and can be reused across projects. Codex previews role files before creating them.
+
+Fable 5 is the bundled cross-provider exception and can be used directly as Planner or Advisor. Fable 5 is a root-facing plan advisor, not a second orchestrator, when assigned to Advisor; when assigned to Planner, it still reports its plan only to the Codex root. The plugin never creates provider accounts, credentials, or protocol compatibility.
 
 ## Use it with Codex Goals
 
-Set a Goal normally, then add your workflow:
-
-```text
-/goal Ship the authentication redesign with tests and migration notes.
-
-Use my Fable advisor and Luna executor workflow until the Goal is complete.
-```
-
-Codex still owns the Goal. The plugin controls the model workflow inside it.
+Create a Codex Goal normally, then tell Codex to use the saved workflow until the Goal is complete. Codex still owns Goal state, permissions, integration, and verification; the plugin only guides which models perform each role.
 
 ## Useful commands
 
 ```text
 /codex-orchestration status
 /codex-orchestration status --require-effective
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
+/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration disable
 ```
 
-`disable` restores the Codex routing values that existed before setup. It does not delete user-owned custom roles.
+`disable` restores the routing values that existed before setup. It does not delete user-owned custom roles.
 
 ## Important limits
 
-- Codex remains the root orchestrator.
-- Fable 5 is a root-facing plan advisor, not a second orchestrator.
-- Other providers must already be configured and authenticated.
+- Codex remains the root orchestrator and final authority.
+- Planner and Advisor report only to Codex; they do not contact each other or Executors directly.
+- The workflow reserves Fable planning tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; the bridge itself still disables tools, edits, and session persistence.
+- Advisor approval is a planning gate, not a guarantee that implementation will succeed.
+- Direct model routes inherit the root provider. Other providers must already be configured and authenticated.
 - The plugin never creates credentials or bypasses permissions and approvals.
 - Codex decides when delegation or parallel work is useful.
 - If you say `no subagents`, Codex must not delegate.
@@ -244,7 +236,11 @@ codex plugin marketplace upgrade codex-orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Start a new task after updating.
+Version **0.5.3 or newer** includes Planner assignment and the direct Fable API advisor paths. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.3` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
+
+If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
+
+Before downgrading to a version older than Planner support, run `/codex-orchestration disable` with the current version first.
 
 ## Uninstall
 

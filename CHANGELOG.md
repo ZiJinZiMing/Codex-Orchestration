@@ -1,15 +1,29 @@
 # Changelog
 
-## 0.5.0 — Unreleased
+## 0.5.3 — Unreleased
 
-- Add Claude Fable 5 as an opt-in, root-only advisor through a bundled local MCP bridge to the authenticated Claude Code CLI.
+- Accept the App Server's null effective readback for a removed legacy thread limit while retaining conflict detection for every concrete legacy limit.
+
+## 0.5.2
+
+- Preserve explicit role labels exactly: a model supplied as `planner:` can never be reinterpreted as an Advisor, and Fable Planner uses only the Planner operations.
+- Give Planner support a new plugin version so marketplace upgrade and reinstall replace the affected Advisor-only `0.5.0` cache instead of reusing it.
+- Add an optional Planner route: a configured model drafts and revises the plan, while omission keeps planning with the root Codex model.
+- Let Claude Fable 5 act as Planner through bounded `create_plan` and `revise_plan` tools while preserving its existing Advisor workflow.
+- Run Planner and Advisor through a root-mediated approval loop that stops on `PLAN_APPROVED`, caps review at five rounds, and fails closed before execution when approval or a required route is unavailable.
+- Migrate native routing state to schema 3 while accepting schemas 1 and 2 as root-Planner configurations, and reject identical configured Planner and Advisor routes.
+- Use one shared full-state validator for native setup/status/disable and Fable authorization, enforcing genuine schema/policy pairs, exact nested restore/scalar/MCP contracts, schema-specific fields, and plugin-owned policy markers.
+- Harden Fable seat authorization against malformed, cross-home, legacy-Planner, multi-seat, and launcher-mismatch state, and document that MCP caller isolation is policy-enforced while no-tools execution is mechanical.
+- Make Claude Fable 5 advisor effort configurable, default it to `high`, support `low` through `max`, treat user-facing `ultra` as an explicit alias for Claude Code's `max`, and fail `--require-effective` when the saved Fable route is unavailable.
+- Add Claude Fable 5 as an opt-in, root-directed Planner or Advisor through a bundled no-tools local MCP bridge.
+- Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
+- Pin `claude-fable-5`, allow only its explicitly documented Claude Code helper in subscription runtime usage metadata, remove provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model set are valid.
 - Add explicit `subscription`, `api`, and fail-closed `auto` Fable authentication modes with non-secret API-source selection, while keeping credentials out of routing state and tool results.
 - Add an explicit `direct-api` Fable transport that sends one strict Anthropic-compatible Messages request without requiring Claude Code or a subscription; keep the existing `claude-code` transport as the backward-compatible default and never fall back between them.
 - Add a standalone, interactively initialized Direct API config source with provider URL/model mapping, hidden credential input, atomic persistence, per-request validation, and complete isolation from Claude settings and API environment variables.
 - Name the three Fable advisor paths explicitly as Claude Code CLI, CCSwitch, and Python API; add a disabled schema-2 default Python provider config with a blank key and configurable provider model while preserving schema-1 files.
 - Explicitly enable multi-agent v2 and migrate the incompatible legacy `agents.max_threads` limit to the v2 session limit while preserving disable restoration.
-- Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
-- Pin every Claude Code model slot to `claude-fable-5`, suppress the Haiku-backed automatic session-title request, omit model fallback, disable tools and session persistence, and fail closed unless runtime `modelUsage` contains only Fable.
+- Pin every Claude Code model slot to `claude-fable-5`, suppress automatic session-title traffic, omit model fallback, and require exact Fable-only metadata on API-backed routes.
 - Add automation-safe native status gating with `--require-effective`.
 - Detect orphaned managed personal roles and distinguish installed policy from live route validation.
 - Fail truthfully when restore-state persistence and config rollback do not both succeed.

@@ -6,10 +6,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import shutil
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Literal
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -23,9 +24,11 @@ from configure_fable_api import (  # noqa: E402
     FableApiConfigError,
     load_config as load_fable_api_config,
 )
+import routing_state  # noqa: E402
 
 
 STATE_FILENAME = ".codex-orchestration-routing.json"
+MANAGED_MARKER = routing_state.MANAGED_MARKER
 FABLE_MODEL = "claude-fable-5"
 ALLOWED_MODELS = frozenset({FABLE_MODEL})
 ALLOWED_DIRECT_RESPONSE_MODELS = frozenset(
@@ -38,7 +41,10 @@ ADVISOR_PATH_DISPLAY = {
     "python-api": "Python API",
 }
 REVIEW_SESSION_NAME = "codex-fable-review"
-SUPPORTED_EFFORTS = {"low", "medium", "high", "max"}
+SUPPORTED_EFFORTS = frozenset(routing_state.FABLE_EFFORTS) | {"low", "medium", "high", "max"}
+FABLE_SERVERS = routing_state.FABLE_SERVERS
+FABLE_HELPER_MODEL = "claude-haiku-4-5-20251001"
+ALLOWED_RUNTIME_MODELS = frozenset({FABLE_MODEL, FABLE_HELPER_MODEL})
 AUTH_MODES = {"subscription", "api", "auto"}
 API_SOURCES = {"config-file", "environment", "user-settings"}
 TRANSPORTS = {"claude-code", "direct-api"}
@@ -73,11 +79,36 @@ CLAUDE_MODEL_ENV = {
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
 }
 SENSITIVE_ENV = API_CREDENTIAL_ENV | OAUTH_OVERRIDE_ENV | PROVIDER_OVERRIDE_ENV
-SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a plan advisor to Codex's root orchestrator.
+MAX_INPUT_CHARS = 200_000
+ADVISOR_SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a plan advisor to Codex's root orchestrator.
 Review the supplied self-contained packet for material correctness, missing constraints, unsafe sequencing, ownership conflicts, and verification gaps. Do not edit files, call tools, spawn agents, contact executors, or attempt implementation.
 
 Your first non-empty line must be exactly PLAN_APPROVED or PLAN_REVISE.
-Use PLAN_APPROVED only when no material gap is present. Use PLAN_REVISE when correction is needed, followed by a concise prioritized list in which every gap has a concrete correction. Ignore style preferences. Report only to the root orchestrator."""
+Use PLAN_APPROVED only when no material gap is present. Use PLAN_REVISE when correction is needed. For PLAN_REVISE, assign every material finding a stable, unique finding ID and give a concrete correction. On later rounds, preserve IDs from the supplied cumulative ledger. Ignore style preferences. Report only to the root orchestrator."""
+
+PLANNER_CREATE_SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a plan author for Codex's root orchestrator.
+Create a concrete implementation plan from the supplied self-contained packet. Include constraints, ownership, sequencing, acceptance criteria, security and compatibility boundaries, and behavioral plus regression verification. Do not edit files, call tools, spawn agents, contact the Advisor or executors, or attempt implementation.
+
+Your first non-empty line must be exactly PLAN_DRAFT. Return the complete draft plan after that signal. Report only to the root orchestrator."""
+
+PLANNER_REVISE_SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a stateless plan reviser for Codex's root orchestrator.
+Revise the supplied canonical current plan using the original task, its source plan version, the latest Advisor critique, and the compact cumulative history. Do not edit files, call tools, spawn agents, contact the Advisor or executors, or attempt implementation.
+
+Your response must use exactly this top-level structure:
+PLAN_REVISION
+
+## FINDINGS_LEDGER
+For every finding in the latest critique, include its stable Advisor finding ID exactly once and mark it INCORPORATED or REJECTED. Give a concrete reason for either disposition. Preserve relevant cumulative-history IDs.
+
+## REVISED_PLAN
+Provide the complete revised plan, clearly identifying its source plan version and revised version.
+
+Both sections must be non-empty. Your first non-empty line must be exactly PLAN_REVISION. The root orchestrator, not you, validates finding coverage and plan-version semantics. Report only to the root orchestrator."""
+
+# Backward-compatible public constant for existing importers.
+SYSTEM_PROMPT = ADVISOR_SYSTEM_PROMPT
+
+Seat = Literal["planner", "advisor"]
 
 
 class AdvisorError(RuntimeError):
@@ -432,8 +463,10 @@ def _run_json(
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AdvisorError(f"Could not run Claude Code: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AdvisorError("Claude Code authentication check timed out; output withheld.") from exc
+    except OSError as exc:
+        raise AdvisorError("Could not run Claude Code authentication check; output withheld.") from exc
     if result.returncode != 0:
         raise AdvisorError(f"Claude Code exited with {result.returncode}.")
     try:
@@ -521,25 +554,77 @@ def check_claude_auth(
     }
 
 
-def load_fable_route(home: Path | None = None) -> dict[str, str]:
-    path = (home or codex_home()) / STATE_FILENAME
+def _read_routing_state(home: Path | None = None) -> dict[str, Any]:
+    root = home or codex_home()
+    path = root / STATE_FILENAME
     try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise AdvisorError("The saved routing state is not a regular file.")
+        if info.st_nlink != 1:
+            raise AdvisorError("The saved routing state has multiple hard links.")
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise AdvisorError("Claude Fable 5 is not configured; run setup first.") from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AdvisorError(f"Could not read the routing state: {exc}") from exc
-    route = payload.get("advisor") if isinstance(payload, dict) else None
+        raise AdvisorError("Could not read valid routing state.") from exc
+    if not isinstance(payload, dict):
+        raise AdvisorError("The saved routing state is invalid.")
+    try:
+        state = routing_state.validate_routing_state(payload)
+    except routing_state.RoutingStateError as exc:
+        # Historical feature snapshots (schema 3/policy 2) predate the
+        # combined schema 4 validator and carried only Advisor transport
+        # metadata. Permit exactly those known route extensions as a narrow
+        # compatibility bridge; schema 4 must always pass the shared validator
+        # with its complete shape and must never reach this fallback.
+        advisor = payload.get("advisor")
+        if (payload.get("schema"), payload.get("policy_version")) != (3, 2) or not isinstance(advisor, dict):
+            raise AdvisorError("The saved routing state is invalid.") from exc
+        policy_payload = json.loads(json.dumps(payload))
+        sanitized_advisor = policy_payload.get("advisor")
+        if not isinstance(sanitized_advisor, dict) or sanitized_advisor.get("kind") != "fable":
+            raise AdvisorError("The saved routing state is invalid.") from exc
+        for key in ("auth_mode", "api_source", "transport", "path"):
+            sanitized_advisor.pop(key, None)
+        try:
+            state = routing_state.validate_routing_state(policy_payload)
+        except routing_state.RoutingStateError as compatibility_exc:
+            raise AdvisorError("The saved routing state is invalid.") from compatibility_exc
+    config_file = state["config_file"]
+    try:
+        belongs_to_home = (
+            Path(config_file).expanduser().resolve()
+            == (root / "config.toml").expanduser().resolve()
+        )
+    except (OSError, RuntimeError) as exc:
+        raise AdvisorError("The saved routing state belongs to another Codex home.") from exc
+    if not belongs_to_home:
+        raise AdvisorError("The saved routing state belongs to another Codex home.")
+    return payload
+
+
+def _validate_seat(seat: str) -> Seat:
+    if seat not in {"planner", "advisor"}:
+        raise AdvisorError("Fable seat must be `planner` or `advisor`.")
+    return seat  # type: ignore[return-value]
+
+
+def _validate_fable_route(route: Any, *, seat: Seat) -> dict[str, str]:
     if not isinstance(route, dict) or route.get("kind") != "fable":
-        raise AdvisorError("Claude Fable 5 is not the configured advisor.")
+        raise AdvisorError(f"Claude Fable 5 is not the configured {seat}.")
     model = route.get("model")
     effort = route.get("effort")
+    if model != FABLE_MODEL or effort not in SUPPORTED_EFFORTS:
+        raise AdvisorError(f"The saved Claude Fable 5 {seat} route is invalid.")
+    if seat == "planner":
+        if set(route) != {"kind", "model", "effort", "server"}:
+            raise AdvisorError("Planner Fable route has unsupported fields.")
+        return {"model": model, "effort": effort}
     auth_mode = route.get("auth_mode", "subscription")
     api_source = route.get("api_source")
     transport = route.get("transport", "claude-code")
     saved_path = route.get("path")
-    if model != FABLE_MODEL or effort not in SUPPORTED_EFFORTS:
-        raise AdvisorError("The saved Claude Fable 5 route is invalid.")
     if auth_mode not in AUTH_MODES:
         raise AdvisorError("The saved Claude Fable 5 auth mode is invalid.")
     if auth_mode == "api" and api_source not in API_SOURCES:
@@ -552,6 +637,8 @@ def load_fable_route(home: Path | None = None) -> dict[str, str]:
         raise AdvisorError("Direct API transport requires Claude api authentication mode.")
     if api_source == "config-file" and transport != "direct-api":
         raise AdvisorError("The config-file API source requires direct-api transport.")
+    if model != FABLE_MODEL or effort not in SUPPORTED_EFFORTS:
+        raise AdvisorError("The saved Claude Fable 5 route is invalid.")
     advisor_path = advisor_path_for(transport, api_source)
     if saved_path is not None and saved_path != advisor_path:
         raise AdvisorError("The saved Claude Fable 5 advisor path is inconsistent.")
@@ -567,6 +654,14 @@ def load_fable_route(home: Path | None = None) -> dict[str, str]:
     return result
 
 
+def load_fable_route(
+    home: Path | None = None, *, seat: str = "advisor"
+) -> dict[str, str]:
+    selected = _validate_seat(seat)
+    payload = _read_routing_state(home)
+    return _validate_fable_route(payload.get(selected), seat=selected)
+
+
 def _normalize_review(review: str) -> tuple[str, str]:
     review = review.strip()
     if not review:
@@ -576,6 +671,177 @@ def _normalize_review(review: str) -> tuple[str, str]:
         first = "PLAN_REVISE"
         review = f"{first}\n\n{review}"
     return first, review
+
+
+def _validate_inputs(operation: str, **values: Any) -> dict[str, str]:
+    checked: dict[str, str] = {}
+    for name, value in values.items():
+        if not isinstance(value, str) or not value.strip():
+            raise AdvisorError(f"`{name}` must be a non-empty string for {operation}.")
+        checked[name] = value
+    if sum(len(value) for value in checked.values()) > MAX_INPUT_CHARS:
+        raise AdvisorError(
+            f"{operation} input exceeds the {MAX_INPUT_CHARS}-character combined limit."
+        )
+    return checked
+
+
+def _first_non_empty_line(response: str) -> str:
+    return next((line.strip() for line in response.splitlines() if line.strip()), "")
+
+
+def _validate_runtime_models(usage: Any, *, auth_path: str) -> list[str]:
+    if not isinstance(usage, dict):
+        raise AdvisorError(
+            "Strict model verification failed: Claude Code omitted modelUsage metadata."
+        )
+    used_models = sorted(set(usage))
+    if not all(isinstance(model, str) for model in used_models):
+        raise AdvisorError(
+            "Runtime metadata reported a model outside the allowed Fable runtime policy."
+        )
+    if FABLE_MODEL not in used_models:
+        raise AdvisorError(
+            "Runtime metadata did not confirm the pinned Claude Fable 5 primary model."
+        )
+    allowed_models = (
+        ALLOWED_RUNTIME_MODELS if auth_path == "subscription" else {FABLE_MODEL}
+    )
+    if not set(used_models).issubset(allowed_models):
+        if auth_path == "api":
+            raise AdvisorError(
+                "Strict model verification failed: expected only claude-fable-5, got "
+                f"{used_models!r}. Advisor unavailable; executor work must remain blocked."
+            )
+        raise AdvisorError(
+            "Runtime metadata reported a model outside the allowed Fable runtime policy."
+        )
+    return used_models
+
+
+def _invoke_fable(
+    *,
+    operation: str,
+    seat: Seat,
+    prompt: str,
+    system_prompt: str,
+    allowed_signals: set[str],
+) -> tuple[str, str, dict[str, str], dict[str, str], list[str]]:
+    """Run one stateless, seat-authorized, no-tools Claude Code operation."""
+    route = load_fable_route(seat=seat)
+    if route.get("transport", "claude-code") != "claude-code":
+        raise AdvisorError("Direct API transport is available only for the Advisor seat.")
+    claude = resolve_claude()
+    auth_mode = route.get("auth_mode", "subscription")
+    auth = check_claude_auth(claude, auth_mode, route.get("api_source"))
+    review_env = strict_review_environment(auth["auth_path"], auth.get("api_source"))
+    api_key_helper = None
+    if auth.get("api_source") == "user-settings":
+        api_env, api_key_helper = user_settings_api_invocation()
+        review_env.update(api_env)
+    command = [
+        str(claude), "-p", "--model", route["model"], "--name", REVIEW_SESSION_NAME,
+        "--effort", route["effort"], "--safe-mode", "--setting-sources", "",
+        "--tools", "", "--permission-mode", "dontAsk", "--no-session-persistence",
+        "--prompt-suggestions", "false", "--output-format", "json",
+        "--system-prompt", system_prompt,
+    ]
+    if auth["auth_path"] == "api":
+        command.append("--bare")
+    if api_key_helper is not None:
+        command.extend(["--settings", json.dumps({"apiKeyHelper": api_key_helper})])
+    try:
+        result = subprocess.run(
+            command, input=prompt, env=review_env, text=True, encoding="utf-8",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=CLAUDE_TIMEOUT_SECONDS, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdvisorError(f"Claude Fable 5 {operation} timed out; output withheld.") from exc
+    except OSError as exc:
+        raise AdvisorError(f"Could not start Claude Fable 5 {operation}; output withheld.") from exc
+    if result.returncode != 0:
+        raise AdvisorError(f"Claude Fable 5 {operation} exited with {result.returncode}; output withheld.")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AdvisorError(f"Claude Fable 5 {operation} returned malformed JSON.") from exc
+    if isinstance(payload, list):
+        completed = [
+            event for event in payload
+            if isinstance(event, dict) and event.get("type") == "result"
+            and event.get("subtype") == "success"
+        ]
+        assistant_text = [
+            block["text"]
+            for event in payload
+            if isinstance(event, dict) and isinstance(event.get("message"), dict)
+            for block in event["message"].get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        payload = dict(completed[-1]) if completed else None
+        if isinstance(payload, dict) and not payload.get("result") and assistant_text:
+            payload["result"] = "\n".join(assistant_text)
+    if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
+        raise AdvisorError(f"Claude Fable 5 {operation} returned an unexpected response.")
+    response = payload["result"].strip()
+    signal = _first_non_empty_line(response)
+    if signal not in allowed_signals:
+        expected = " or ".join(sorted(allowed_signals))
+        raise AdvisorError(f"Claude Fable 5 {operation} omitted the required {expected} signal.")
+    used_models = _validate_runtime_models(
+        payload.get("modelUsage"), auth_path=auth["auth_path"]
+    )
+    return signal, response, route, auth, used_models
+
+
+def _base_result(
+    *, route: dict[str, str], auth: dict[str, str], used_models: list[str]
+) -> dict[str, Any]:
+    return {
+        "model": FABLE_MODEL,
+        "effort": route["effort"],
+        "auth_mode": auth.get("auth_mode", "subscription"),
+        "auth_path": auth.get("auth_path", "subscription"),
+        "auth_method": auth["auth_method"],
+        "used_models": used_models,
+    }
+
+
+def create_plan(packet: str) -> dict[str, Any]:
+    values = _validate_inputs("plan creation", packet=packet)
+    signal, response, route, auth, used_models = _invoke_fable(
+        operation="plan creation", seat="planner", prompt=values["packet"],
+        system_prompt=PLANNER_CREATE_SYSTEM_PROMPT, allowed_signals={"PLAN_DRAFT"},
+    )
+    return {"signal": signal, "plan": response, **_base_result(route=route, auth=auth, used_models=used_models)}
+
+
+def _validate_revision_structure(response: str) -> None:
+    lines = response.splitlines()
+    ledger_positions = [i for i, line in enumerate(lines) if line.strip() == "## FINDINGS_LEDGER"]
+    plan_positions = [i for i, line in enumerate(lines) if line.strip() == "## REVISED_PLAN"]
+    if len(ledger_positions) != 1 or len(plan_positions) != 1:
+        raise AdvisorError("Claude Fable 5 plan revision must contain exactly one FINDINGS_LEDGER and one REVISED_PLAN section.")
+    ledger_index, plan_index = ledger_positions[0], plan_positions[0]
+    if ledger_index >= plan_index or not "\n".join(lines[ledger_index + 1:plan_index]).strip() or not "\n".join(lines[plan_index + 1:]).strip():
+        raise AdvisorError("Claude Fable 5 plan revision has an empty or misordered section.")
+
+
+def revise_plan(task: str, current_plan: str, critique: str, history: str) -> dict[str, Any]:
+    values = _validate_inputs("plan revision", task=task, current_plan=current_plan, critique=critique, history=history)
+    prompt = "\n\n".join(
+        ("# ORIGINAL_TASK\n" + values["task"], "# CANONICAL_CURRENT_PLAN_WITH_SOURCE_VERSION\n" + values["current_plan"],
+         "# LATEST_ADVISOR_CRITIQUE_WITH_STABLE_FINDING_IDS\n" + values["critique"],
+         "# COMPACT_CUMULATIVE_FINDINGS_HISTORY\n" + values["history"])
+    )
+    signal, response, route, auth, used_models = _invoke_fable(
+        operation="plan revision", seat="planner", prompt=prompt,
+        system_prompt=PLANNER_REVISE_SYSTEM_PROMPT, allowed_signals={"PLAN_REVISION"},
+    )
+    _validate_revision_structure(response)
+    return {"signal": signal, "revision": response, **_base_result(route=route, auth=auth, used_models=used_models)}
 
 
 def _review_plan_claude_code(
@@ -634,12 +900,13 @@ def _review_plan_claude_code(
             timeout=CLAUDE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AdvisorError(f"Claude Fable 5 review failed: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AdvisorError("Claude Fable 5 review timed out; output withheld.") from exc
+    except OSError as exc:
+        raise AdvisorError("Could not start Claude Fable 5 review; output withheld.") from exc
     if result.returncode != 0:
         raise AdvisorError(
-            f"Claude Fable 5 exited with {result.returncode}; inspect Claude Code "
-            "diagnostics locally."
+            f"Claude Fable 5 exited with {result.returncode}; output withheld."
         )
     try:
         payload = json.loads(result.stdout)
@@ -672,17 +939,9 @@ def _review_plan_claude_code(
     if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
         raise AdvisorError("Claude Fable 5 returned an unexpected response.")
     first, review = _normalize_review(payload["result"])
-    usage = payload.get("modelUsage")
-    if not isinstance(usage, dict) or not usage:
-        raise AdvisorError(
-            "Strict model verification failed: Claude Code omitted modelUsage metadata."
-        )
-    used_models = sorted(set(usage))
-    if set(used_models) != ALLOWED_MODELS:
-        raise AdvisorError(
-            "Strict model verification failed: expected only claude-fable-5, got "
-            f"{used_models!r}. Advisor unavailable; executor work must remain blocked."
-        )
+    used_models = _validate_runtime_models(
+        payload.get("modelUsage"), auth_path=auth["auth_path"]
+    )
     response = {
         "decision": first,
         "review": review,
@@ -812,12 +1071,11 @@ def _review_plan_direct_api(
 
 
 def review_plan(packet: str) -> dict[str, Any]:
-    if not isinstance(packet, str) or not packet.strip():
-        raise AdvisorError("`packet` must be a non-empty self-contained review packet.")
+    values = _validate_inputs("plan review", packet=packet)
     route = load_fable_route()
     if route.get("transport", "claude-code") == "direct-api":
-        return _review_plan_direct_api(packet, route)
-    return _review_plan_claude_code(packet, route)
+        return _review_plan_direct_api(values["packet"], route)
+    return _review_plan_claude_code(values["packet"], route)
 
 
 def advisor_status(route: dict[str, str]) -> dict[str, Any]:
@@ -844,6 +1102,43 @@ def advisor_status(route: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _configured_fable_seats() -> dict[str, dict[str, str]]:
+    payload = _read_routing_state()
+    routes: dict[str, dict[str, str]] = {}
+    for seat in ("planner", "advisor"):
+        value = payload.get(seat)
+        if value is None:
+            continue
+        if not isinstance(value, dict) or value.get("kind") != "fable":
+            continue
+        routes[seat] = _validate_fable_route(value, seat=_validate_seat(seat))
+    if not routes:
+        raise AdvisorError("Claude Fable 5 is not configured for Planner or Advisor.")
+    return routes
+
+
+def status() -> dict[str, Any]:
+    routes = _configured_fable_seats()
+    advisor = routes.get("advisor")
+    if advisor is not None and advisor.get("transport") == "direct-api":
+        auth = advisor_status(advisor)
+    else:
+        auth = check_claude_auth(
+            auth_mode=advisor.get("auth_mode", "subscription") if advisor else "subscription",
+            api_source=advisor.get("api_source") if advisor else None,
+        )
+    seats = {seat: {"model": route["model"], "effort": route["effort"]} for seat, route in routes.items()}
+    result: dict[str, Any] = {"available": True, "configured_seats": list(seats), "seats": seats, **auth}
+    if advisor is not None:
+        # Preserve the legacy status surface without exposing the internal
+        # subscription route label; direct-API status includes its explicit
+        # transport/source metadata for diagnostics.
+        result.update({"model": advisor["model"], "effort": advisor["effort"]})
+        if advisor.get("transport") != "claude-code" or advisor.get("auth_mode") != "subscription":
+            result.update(advisor)
+    return result
+
+
 def tool_definitions() -> list[dict[str, Any]]:
     annotations = {
         "readOnlyHint": True,
@@ -851,7 +1146,33 @@ def tool_definitions() -> list[dict[str, Any]]:
         "idempotentHint": True,
         "openWorldHint": True,
     }
+    string_property = {"type": "string", "maxLength": MAX_INPUT_CHARS}
     return [
+        {
+            "name": "create_plan",
+            "title": "Create a plan with Claude Fable 5",
+            "description": "Create one stateless plan draft with the configured Fable Planner.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"packet": {**string_property, "description": "Complete planning packet."}},
+                "required": ["packet"], "additionalProperties": False,
+            }, "annotations": annotations,
+        },
+        {
+            "name": "revise_plan",
+            "title": "Revise a plan with Claude Fable 5",
+            "description": "Create one stateless revision with a findings ledger and complete revised plan.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {**string_property, "description": "Original task."},
+                    "current_plan": {**string_property, "description": "Canonical current plan with source version."},
+                    "critique": {**string_property, "description": "Latest Advisor critique with stable finding IDs."},
+                    "history": {**string_property, "description": "Compact cumulative findings history."},
+                },
+                "required": ["task", "current_plan", "critique", "history"], "additionalProperties": False,
+            }, "annotations": annotations,
+        },
         {
             "name": "review_plan",
             "title": "Review a plan with Claude Fable 5",
@@ -893,6 +1214,15 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> dict[str
     }
 
 
+def _tool_arguments(arguments: Any, allowed: set[str]) -> dict[str, Any]:
+    if not isinstance(arguments, dict):
+        raise AdvisorError("Tool arguments must be an object.")
+    unexpected = sorted(set(arguments) - allowed)
+    if unexpected:
+        raise AdvisorError(f"Unexpected tool argument(s): {', '.join(unexpected)}.")
+    return arguments
+
+
 def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
     method = request.get("method")
     request_id = request.get("id")
@@ -913,12 +1243,18 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
         name = params.get("name") if isinstance(params, dict) else None
         arguments = params.get("arguments", {}) if isinstance(params, dict) else {}
         try:
-            if name == "review_plan":
-                packet = arguments.get("packet") if isinstance(arguments, dict) else None
-                result = _tool_result(review_plan(packet))
+            if name == "create_plan":
+                args = _tool_arguments(arguments, {"packet"})
+                result = _tool_result(create_plan(args.get("packet")))
+            elif name == "revise_plan":
+                args = _tool_arguments(arguments, {"task", "current_plan", "critique", "history"})
+                result = _tool_result(revise_plan(args.get("task"), args.get("current_plan"), args.get("critique"), args.get("history")))
+            elif name == "review_plan":
+                args = _tool_arguments(arguments, {"packet"})
+                result = _tool_result(review_plan(args.get("packet")))
             elif name == "status":
-                route = load_fable_route()
-                result = _tool_result(advisor_status(route))
+                _tool_arguments(arguments, set())
+                result = _tool_result(status())
             else:
                 raise AdvisorError(f"Unknown tool: {name!r}.")
         except AdvisorError as exc:

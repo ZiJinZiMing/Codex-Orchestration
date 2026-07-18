@@ -1,7 +1,7 @@
 # Release process
 
 1. Replace `Unreleased` in `CHANGELOG.md` with the release date.
-2. Confirm `.codex-plugin/plugin.json`, the changelog, the installed package, and lifecycle fixture all use the same semantic version.
+2. Confirm `.codex-plugin/plugin.json`, the changelog, the installed package, and lifecycle fixture all use the same new semantic version. Never publish different plugin behavior under a version already used by another bundle; fix forward with a new version so Codex cannot reuse the old cache identity.
 3. Run:
 
    ```bash
@@ -13,10 +13,12 @@
    ```
 
 4. From a new Desktop task, verify one direct same-provider child route. Record `route accepted`; record `used and confirmed` only if the client exposes effective child model/provider/effort metadata.
-5. If Claude Fable 5 is included in the release, verify setup, status, one `review_plan` call, exact runtime model metadata, and disable/restore for every changed transport. Claude Code subscription verification requires a first-party login; direct API verification requires an explicit API source and must prove there was no CLI fallback. Standalone `config-file` verification must additionally poison or remove every API environment and Claude-settings input and prove the request URL/model/credential came only from the validated plugin-owned file.
+5. If Claude Fable 5 is included in the release, verify every supported seat and changed transport. Verify Fable Planner `create_plan`/`revise_plan` with a different Advisor and Fable Advisor `review_plan` with root planning, then confirm the pinned primary model, exact allowed runtime-model set, effort behavior, status, bounded approval loop, and disable/restore. Claude Code subscription verification requires a first-party login; direct API verification requires an explicit API source and must prove there was no CLI fallback. Standalone `config-file` verification must additionally poison or remove every API environment and Claude-settings input and prove the request URL/model/credential came only from the validated plugin-owned file. An unknown helper or response model is a release failure, not an implicit allowlist expansion.
 6. Merge only after every protected check passes.
 7. Create a signed annotated tag named `v<manifest-version>` at the reviewed merge commit.
 8. Re-run `python3 scripts/release_check.py --require-tag` and publish a GitHub release from that tag using the matching changelog section.
-9. Install from the public marketplace in a clean Codex home, start a new task, and verify setup, `status --require-effective`, and disable.
+9. Upgrade from the previous public version in a clean Codex home, reinstall the plugin, and verify the installed version and skill contents changed before starting a new task. Then verify setup, `status --require-effective`, and disable.
 
 Never move a published release tag. If a release is bad, fix forward with a new version and retain the old tag as provenance.
+
+Before downgrading to a release that predates Planner/state-schema-3 support, run `disable` with the current release. Older versions must fail closed on the unknown state schema rather than guessing how to restore it.
