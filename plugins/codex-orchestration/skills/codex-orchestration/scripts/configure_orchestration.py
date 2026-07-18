@@ -1000,6 +1000,8 @@ def stage_text(
                     f"Unsafe explicit staging path for {path}: {staged_path}"
                 )
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             descriptor = os.open(staged_path, flags, mode)
@@ -1038,6 +1040,8 @@ def _write_staged_content(
 ) -> None:
     """Write only to a private staged inode; the live file is never truncated."""
     flags = os.O_WRONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(staged, flags)
@@ -1071,6 +1075,234 @@ def _path_identity(path: Path) -> tuple[int, int] | None:
     except FileNotFoundError:
         return None
     return current.st_dev, current.st_ino
+
+
+def _windows_open_verified_file(
+    path: Path,
+    expected_identity: tuple[int, int],
+    *,
+    desired_access: int,
+) -> tuple[Any, Any]:
+    """Open one non-reparse file and bind its handle to the expected inode."""
+
+    if os.name != "nt":
+        raise ConfigurationError("Windows file-handle operation requested off Windows.")
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        )
+
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(ByHandleFileInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    ctypes.set_last_error(0)
+    handle = create_file(
+        str(path),
+        desired_access,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_flag_open_reparse_point,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        error = ctypes.get_last_error()
+        raise ConfigurationError(f"Could not open a verified Windows file: {error}.")
+    try:
+        information = ByHandleFileInformation()
+        ctypes.set_last_error(0)
+        if not get_information(handle, ctypes.byref(information)):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not identify an opened Windows file: {error}."
+            )
+        file_index = (information.file_index_high << 32) | information.file_index_low
+        if (
+            file_index != expected_identity[1]
+            or _path_identity(path) != expected_identity
+            or path.is_symlink()
+        ):
+            raise ConfigurationError("Windows file identity changed before mutation.")
+        return kernel32, handle
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _windows_replace_file(
+    staged: Path,
+    destination: Path,
+    staged_identity: tuple[int, int],
+) -> None:
+    """Atomically publish a verified file, including over a read-only target."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    delete_access = 0x00010000
+    file_write_attributes = 0x00000100
+    synchronize = 0x00100000
+    kernel32, handle = _windows_open_verified_file(
+        staged,
+        staged_identity,
+        desired_access=delete_access | file_write_attributes | synchronize,
+    )
+    try:
+        class FileRenameInfo(ctypes.Structure):
+            _fields_ = (
+                ("flags", wintypes.DWORD),
+                ("root_directory", wintypes.HANDLE),
+                ("file_name_length", wintypes.DWORD),
+                ("file_name", wintypes.WCHAR * 1),
+            )
+
+        set_information = kernel32.SetFileInformationByHandle
+        set_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        set_information.restype = wintypes.BOOL
+        destination_bytes = os.path.abspath(destination).encode("utf-16-le")
+        buffer_size = ctypes.sizeof(FileRenameInfo) + len(destination_bytes)
+        buffer = ctypes.create_string_buffer(buffer_size)
+        information = FileRenameInfo.from_buffer(buffer)
+        information.flags = 0x00000001 | 0x00000002 | 0x00000040
+        information.root_directory = None
+        information.file_name_length = len(destination_bytes)
+        ctypes.memmove(
+            ctypes.addressof(buffer) + FileRenameInfo.file_name.offset,
+            destination_bytes,
+            len(destination_bytes),
+        )
+        ctypes.set_last_error(0)
+        if not set_information(
+            handle,
+            22,  # FileRenameInfoEx
+            ctypes.cast(buffer, ctypes.c_void_p),
+            buffer_size,
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not atomically replace a Windows file: {error}."
+            )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_unlink_exact(path: Path, expected_identity: tuple[int, int]) -> None:
+    """Remove exactly one verified Windows link, even when it is read-only."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    delete_access = 0x00010000
+    file_write_attributes = 0x00000100
+    synchronize = 0x00100000
+    kernel32, handle = _windows_open_verified_file(
+        path,
+        expected_identity,
+        desired_access=delete_access | file_write_attributes | synchronize,
+    )
+    try:
+        set_information = kernel32.SetFileInformationByHandle
+        set_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        set_information.restype = wintypes.BOOL
+        flags = wintypes.DWORD(0x00000001 | 0x00000002 | 0x00000010)
+        ctypes.set_last_error(0)
+        if not set_information(
+            handle,
+            21,  # FileDispositionInfoEx
+            ctypes.byref(flags),
+            ctypes.sizeof(flags),
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not remove a verified Windows temporary: {error}."
+            )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _unlink_exact(
+    path: Path,
+    expected_identity: tuple[int, int],
+    *,
+    missing_ok: bool = False,
+) -> None:
+    """Unlink only the expected regular-file inode, never a replacement."""
+
+    try:
+        current = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != expected_identity
+    ):
+        raise ConfigurationError(f"Refusing to remove a changed temporary: {path}.")
+    if os.name == "nt":
+        _windows_unlink_exact(path, expected_identity)
+    else:
+        path.unlink()
+    if _path_identity(path) is not None or path.is_symlink():
+        raise ConfigurationError(f"Verified temporary removal failed: {path}.")
+
+
+def _replace_exact(
+    staged: Path,
+    destination: Path,
+    staged_identity: tuple[int, int],
+) -> None:
+    if os.name == "nt":
+        _windows_replace_file(staged, destination, staged_identity)
+    else:
+        os.replace(staged, destination)
 
 
 def _xattr_snapshot(path: Path) -> dict[str, bytes] | bytes | None:
@@ -1125,6 +1357,400 @@ def _acl_snapshot(path: Path) -> tuple[bytes, ...] | None:
     return tuple(completed.stdout.splitlines()[1:])
 
 
+def _windows_security_descriptor(path: Path) -> bytes | None:
+    """Read owner, group, DACL, and mandatory label self-relatively."""
+
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    requested = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000010
+    error_insufficient_buffer = 122
+    maximum_attempts = 3
+    advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    get_file_security = advapi.GetFileSecurityW
+    get_file_security.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    get_file_security.restype = wintypes.BOOL
+    for _ in range(maximum_attempts):
+        needed = wintypes.DWORD()
+        ctypes.set_last_error(0)
+        first = get_file_security(
+            str(path), requested, None, 0, ctypes.byref(needed)
+        )
+        error = ctypes.get_last_error()
+        if first:
+            raise ConfigurationError(
+                f"Windows returned a descriptor without a sizing buffer for {path}."
+            )
+        if error != error_insufficient_buffer or needed.value <= 0:
+            raise ConfigurationError(
+                f"Could not size the Windows security descriptor for {path}: {error}."
+            )
+        allocated = needed.value
+        buffer = ctypes.create_string_buffer(allocated)
+        ctypes.set_last_error(0)
+        if get_file_security(
+            str(path),
+            requested,
+            ctypes.cast(buffer, ctypes.c_void_p),
+            allocated,
+            ctypes.byref(needed),
+        ):
+            return bytes(buffer.raw[: needed.value])
+        error = ctypes.get_last_error()
+        if error != error_insufficient_buffer:
+            raise ConfigurationError(
+                f"Could not read the Windows security descriptor for {path}: {error}."
+            )
+    raise ConfigurationError(
+        f"Windows security descriptor changed repeatedly while reading {path}."
+    )
+
+
+def _windows_security_sddl(descriptor: bytes | None) -> str | None:
+    """Canonicalize the selected descriptor components as SDDL."""
+
+    if descriptor is None:
+        return None
+    if os.name != "nt":
+        raise ConfigurationError("Windows security metadata was supplied off Windows.")
+    import ctypes
+    from ctypes import wintypes
+
+    requested = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000010
+    sddl_revision_1 = 1
+    advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    convert = advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    convert.argtypes = (
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(wintypes.ULONG),
+    )
+    convert.restype = wintypes.BOOL
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    buffer = ctypes.create_string_buffer(descriptor)
+    rendered = wintypes.LPWSTR()
+    length = wintypes.ULONG()
+    if not convert(
+        ctypes.cast(buffer, ctypes.c_void_p),
+        sddl_revision_1,
+        requested,
+        ctypes.byref(rendered),
+        ctypes.byref(length),
+    ):
+        error = ctypes.get_last_error()
+        raise ConfigurationError(
+            f"Could not canonicalize a Windows security descriptor: {error}."
+        )
+    try:
+        if not rendered:
+            raise ConfigurationError(
+                "Windows security descriptor canonicalization returned no text."
+            )
+        return rendered.value
+    finally:
+        kernel32.LocalFree(ctypes.cast(rendered, ctypes.c_void_p))
+
+
+def _windows_security_signature(path: Path) -> str | None:
+    return _windows_security_sddl(_windows_security_descriptor(path))
+
+
+def _windows_sddl_mismatch_summary(expected: str, actual: str) -> str:
+    """Describe an SDDL mismatch without exposing SIDs or ACL contents."""
+
+    def components(value: str) -> tuple[dict[str, str], bool]:
+        boundaries: list[tuple[str, int]] = []
+        depth = 0
+        quoted = False
+        escaped = False
+        index = 0
+        while index < len(value):
+            character = value[index]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    if index + 1 < len(value) and value[index + 1] == '"':
+                        index += 1
+                    else:
+                        quoted = False
+            elif character == '"':
+                quoted = True
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                if depth == 0:
+                    return {}, False
+                depth -= 1
+            elif (
+                depth == 0
+                and character in "OGDS"
+                and index + 1 < len(value)
+                and value[index + 1] == ":"
+            ):
+                boundaries.append((character, index))
+            index += 1
+        if depth or quoted or escaped:
+            return {}, False
+        ranks = {marker: rank for rank, marker in enumerate("OGDS")}
+        if any(
+            ranks[current[0]] <= ranks[previous[0]]
+            for previous, current in zip(boundaries, boundaries[1:])
+        ):
+            return {}, False
+        return (
+            {
+                marker: value[start : boundaries[position + 1][1]]
+                if position + 1 < len(boundaries)
+                else value[start:]
+                for position, (marker, start) in enumerate(boundaries)
+            },
+            True,
+        )
+
+    def digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+    def acl_flags(value: str) -> str:
+        if not value:
+            return "missing"
+        flags = value[2:].split("(", 1)[0]
+        if not flags:
+            return "none"
+        return flags if re.fullmatch(r"(?:(?:P|AR|AI))*", flags) else "unrecognized"
+
+    def ace_count(value: str) -> int:
+        if not value:
+            return 0
+        depth = 0
+        quoted = False
+        escaped = False
+        count = 0
+        index = 0
+        while index < len(value):
+            character = value[index]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    if index + 1 < len(value) and value[index + 1] == '"':
+                        index += 1
+                    else:
+                        quoted = False
+            elif character == '"':
+                quoted = True
+            elif character == "(":
+                if depth == 0:
+                    count += 1
+                depth += 1
+            elif character == ")":
+                if depth == 0:
+                    return -1
+                depth -= 1
+            index += 1
+        return count if not depth and not quoted and not escaped else -1
+
+    expected_parts, expected_valid = components(expected)
+    actual_parts, actual_valid = components(actual)
+    details = [
+        f"expected_parse_valid={expected_valid}",
+        f"actual_parse_valid={actual_valid}",
+    ]
+    for marker, label in (("O", "owner"), ("G", "group"), ("D", "dacl"), ("S", "sacl")):
+        before = expected_parts.get(marker, "")
+        after = actual_parts.get(marker, "")
+        details.append(
+            f"{label}_equal={expected_valid and actual_valid and before == after}"
+        )
+        if marker in {"D", "S"}:
+            details.extend(
+                (
+                    f"expected_{label}_flags={acl_flags(before)}",
+                    f"actual_{label}_flags={acl_flags(after)}",
+                    f"expected_{label}_aces={ace_count(before)}",
+                    f"actual_{label}_aces={ace_count(after)}",
+                    f"expected_{label}_hash={digest(before)}",
+                    f"actual_{label}_hash={digest(after)}",
+                )
+            )
+    return ", ".join(details)
+
+
+def _windows_named_security_information(control: int, *, has_label: bool) -> int:
+    """Select exact access-control components for SetNamedSecurityInfoW."""
+
+    owner_security_information = 0x00000001
+    group_security_information = 0x00000002
+    dacl_security_information = 0x00000004
+    label_security_information = 0x00000010
+    unprotected_dacl_security_information = 0x20000000
+    protected_sacl_security_information = 0x40000000
+    protected_dacl_security_information = 0x80000000
+    se_dacl_protected = 0x1000
+    se_sacl_protected = 0x2000
+    requested = (
+        owner_security_information
+        | group_security_information
+        | dacl_security_information
+    )
+    if has_label:
+        requested |= label_security_information
+    requested |= (
+        protected_dacl_security_information
+        if control & se_dacl_protected
+        else unprotected_dacl_security_information
+    )
+    if has_label and control & se_sacl_protected:
+        requested |= protected_sacl_security_information
+    return requested
+
+
+def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> None:
+    """Apply and canonically verify access-control metadata on one staged file."""
+
+    if descriptor is None:
+        return
+    if os.name != "nt":
+        raise ConfigurationError("Windows security metadata was supplied off Windows.")
+    import ctypes
+    from ctypes import wintypes
+
+    expected = _windows_security_sddl(descriptor)
+    if _windows_security_signature(path) == expected:
+        return
+    advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    descriptor_buffer = ctypes.create_string_buffer(descriptor)
+    descriptor_pointer = ctypes.cast(descriptor_buffer, ctypes.c_void_p)
+
+    get_control = advapi.GetSecurityDescriptorControl
+    get_control.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    get_control.restype = wintypes.BOOL
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    if not get_control(
+        descriptor_pointer, ctypes.byref(control), ctypes.byref(revision)
+    ):
+        error = ctypes.get_last_error()
+        raise ConfigurationError(
+            f"Could not inspect Windows security descriptor control for {path}: {error}."
+        )
+
+    def descriptor_sid(function_name: str) -> ctypes.c_void_p:
+        function = getattr(advapi, function_name)
+        function.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        )
+        function.restype = wintypes.BOOL
+        value = ctypes.c_void_p()
+        defaulted = wintypes.BOOL()
+        ctypes.set_last_error(0)
+        if not function(
+            descriptor_pointer, ctypes.byref(value), ctypes.byref(defaulted)
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not inspect a Windows security descriptor SID for {path}: "
+                f"{error}."
+            )
+        if not value.value:
+            raise ConfigurationError(
+                f"Windows security descriptor SID is missing for {path}."
+            )
+        return value
+
+    def descriptor_acl(function_name: str) -> tuple[bool, ctypes.c_void_p]:
+        function = getattr(advapi, function_name)
+        function.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        )
+        function.restype = wintypes.BOOL
+        present = wintypes.BOOL()
+        value = ctypes.c_void_p()
+        defaulted = wintypes.BOOL()
+        ctypes.set_last_error(0)
+        if not function(
+            descriptor_pointer,
+            ctypes.byref(present),
+            ctypes.byref(value),
+            ctypes.byref(defaulted),
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not inspect a Windows security descriptor ACL for {path}: "
+                f"{error}."
+            )
+        return bool(present.value), value
+
+    owner = descriptor_sid("GetSecurityDescriptorOwner")
+    group = descriptor_sid("GetSecurityDescriptorGroup")
+    dacl_present, dacl = descriptor_acl("GetSecurityDescriptorDacl")
+    if not dacl_present or not dacl.value:
+        raise ConfigurationError(f"Windows security descriptor DACL is missing for {path}.")
+    sacl_present, sacl = descriptor_acl("GetSecurityDescriptorSacl")
+    has_label = sacl_present and bool(sacl.value)
+
+    set_named_security_info = advapi.SetNamedSecurityInfoW
+    set_named_security_info.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    set_named_security_info.restype = wintypes.DWORD
+    result = set_named_security_info(
+        str(path),
+        1,  # SE_FILE_OBJECT
+        _windows_named_security_information(control.value, has_label=has_label),
+        owner,
+        group,
+        dacl,
+        sacl if has_label else None,
+    )
+    if result:
+        raise ConfigurationError(
+            f"Could not apply the Windows security descriptor for {path}: {result}."
+        )
+    actual = _windows_security_signature(path)
+    if actual != expected:
+        if expected is None or actual is None:
+            raise ConfigurationError(
+                f"Windows security descriptor verification was unavailable for {path}."
+            )
+        raise ConfigurationError(
+            f"Windows security descriptor verification failed for {path}: "
+            f"{_windows_sddl_mismatch_summary(expected, actual)}."
+        )
+
+
 def _metadata_signature(path: Path) -> tuple[Any, ...]:
     current = path.stat(follow_symlinks=False)
     return (
@@ -1135,6 +1761,7 @@ def _metadata_signature(path: Path) -> tuple[Any, ...]:
         current.st_mtime_ns,
         _xattr_snapshot(path),
         _acl_snapshot(path),
+        _windows_security_signature(path),
     )
 
 
@@ -1166,7 +1793,11 @@ def stage_existing_file(
 ) -> Path:
     """Clone a live file's security metadata, then stage complete new bytes."""
     staged = stage_text(path, "", 0o600, staged_path)
+    staged_identity = _path_identity(staged)
+    if staged_identity is None:
+        raise ConfigurationError(f"New staging file disappeared: {staged}")
     try:
+        windows_security = _windows_security_descriptor(path)
         cp = Path("/bin/cp")
         if os.name == "posix" and cp.is_file() and os.access(cp, os.X_OK):
             try:
@@ -1189,29 +1820,42 @@ def stage_existing_file(
         else:  # pragma: no cover - non-POSIX fallback
             shutil.copy2(path, staged, follow_symlinks=False)
 
-        staged_identity = _path_identity(staged)
-        if staged_identity is None:
-            raise ConfigurationError(f"Metadata clone disappeared: {staged}")
+        if _path_identity(staged) != staged_identity:
+            raise ConfigurationError(f"Metadata clone identity changed: {staged}")
+        staged.chmod(stat.S_IMODE(staged.stat(follow_symlinks=False).st_mode) | stat.S_IWUSR)
         _write_staged_content(staged, content, staged_identity)
-
-        source_stat = path.stat(follow_symlinks=False)
-        if hasattr(os, "chown"):
-            os.chown(
-                staged,
-                source_stat.st_uid,
-                source_stat.st_gid,
-                follow_symlinks=False,
-            )
-        shutil.copystat(path, staged, follow_symlinks=False)
-        with staged.open("rb") as handle:
-            os.fsync(handle.fileno())
+        flags = os.O_RDWR
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        durability_descriptor = os.open(staged, flags)
+        try:
+            opened = os.fstat(durability_descriptor)
+            if (opened.st_dev, opened.st_ino) != staged_identity:
+                raise ConfigurationError(
+                    f"Staged-file identity changed before metadata apply for {staged}."
+                )
+            source_stat = path.stat(follow_symlinks=False)
+            if hasattr(os, "chown"):
+                os.chown(
+                    staged,
+                    source_stat.st_uid,
+                    source_stat.st_gid,
+                    follow_symlinks=False,
+                )
+            shutil.copystat(path, staged, follow_symlinks=False)
+            _set_windows_security_descriptor(staged, windows_security)
+            os.fsync(durability_descriptor)
+        finally:
+            os.close(durability_descriptor)
         if _metadata_signature(staged) != _metadata_signature(path):
             raise ConfigurationError(
                 f"Could not preserve all supported metadata while staging {path}."
             )
         return staged
     except BaseException:
-        staged.unlink(missing_ok=True)
+        _unlink_exact(staged, staged_identity, missing_ok=True)
         raise
 
 
@@ -1223,7 +1867,7 @@ def _link_original_tombstone(
 ) -> None:
     if tombstone.is_symlink() or _path_identity(tombstone) != placeholder_identity:
         raise ConfigurationError(f"Update tombstone changed before use: {tombstone}.")
-    tombstone.unlink()
+    _unlink_exact(tombstone, placeholder_identity)
     os.link(destination, tombstone, follow_symlinks=False)
     destination_stat = destination.stat(follow_symlinks=False)
     tombstone_stat = tombstone.stat(follow_symlinks=False)
@@ -1247,6 +1891,7 @@ def _replace_staged_atomically(
     original_identity: tuple[int, int],
     expected_metadata: tuple[Any, ...],
     expected_content_sha256: str,
+    replacement_content_sha256: str,
 ) -> None:
     staged_stat = staged.stat(follow_symlinks=False)
     if (
@@ -1263,11 +1908,12 @@ def _replace_staged_atomically(
         or _metadata_signature(destination) != expected_metadata
         or _sha256_file(destination) != expected_content_sha256
         or _metadata_signature(staged) != expected_metadata
+        or _sha256_file(staged) != replacement_content_sha256
     ):
         raise ConfigurationError(
             f"Destination metadata changed before publication: {destination}."
         )
-    os.replace(staged, destination)
+    _replace_exact(staged, destination, staged_identity)
     _fsync_directory(destination.parent)
     destination_stat = destination.stat(follow_symlinks=False)
     tombstone_identity = _path_identity(tombstone)
@@ -1315,7 +1961,7 @@ def _move_original_to_tombstone(
         raise ConfigurationError(
             f"Destination changed before atomic deletion: {destination}."
         )
-    os.replace(destination, tombstone)
+    _replace_exact(destination, tombstone, original_identity)
     _fsync_directory(destination.parent)
     tombstone_stat = tombstone.stat(follow_symlinks=False)
     if (
@@ -1364,9 +2010,9 @@ def _restore_original_from_tombstone(
                 f"Original tombstone link topology changed for {destination}."
             )
         if destination_identity == original_identity:
-            tombstone.unlink()
+            _unlink_exact(tombstone, original_identity)
         elif destination_identity in {None, installed_identity}:
-            os.replace(tombstone, destination)
+            _replace_exact(tombstone, destination, original_identity)
         else:
             raise ConfigurationError(
                 f"Cannot restore {destination}; the destination is occupied."
@@ -1847,7 +2493,11 @@ def _cleanup_journal_temporaries(
                 raise ConfigurationError(
                     f"Transaction temporary identity changed: {candidate}."
                 )
-            candidate.unlink()
+            if identity is None:
+                raise ConfigurationError(
+                    f"Transaction temporary disappeared during cleanup: {candidate}."
+                )
+            _unlink_exact(candidate, identity)
             touched.add(candidate.parent)
     for directory in sorted(touched):
         _fsync_directory(directory)
@@ -2022,7 +2672,7 @@ def recover_incomplete_transaction(root: Path) -> bool:
                         raise ConfigurationError(
                             f"Staged recovery copy was modified: {staged_old}."
                         ) from tombstone_error
-                    os.replace(staged_old, destination)
+                    _replace_exact(staged_old, destination, staged_old_identity)
                     used_staged_backup = True
                 destination_stat = destination.stat(follow_symlinks=False)
                 if (
@@ -2112,7 +2762,7 @@ def _apply_changes_transactionally_locked(
         _relative_to_root(path, root)
 
     prepared: list[dict[str, Any]] = []
-    staged_paths: set[Path] = set()
+    staged_paths: dict[Path, tuple[int, int]] = {}
     created_dirs: set[Path] = set()
     attempted: list[dict[str, Any]] = []
     committed = False
@@ -2153,12 +2803,6 @@ def _apply_changes_transactionally_locked(
             if stat_result is not None and stat_result.st_nlink != 1:
                 raise ConfigurationError(
                     f"Refusing hard-linked managed configuration file {path}."
-                )
-            if os.name == "nt" and existed:
-                raise ConfigurationError(
-                    "Updating or removing an existing managed file is disabled on "
-                    "Windows because this release cannot preserve and verify NTFS "
-                    f"security descriptors safely: {path}."
                 )
             prefix = f".codex-orchestration-txn-{transaction_id}-{index}"
             item = {
@@ -2254,29 +2898,51 @@ def _apply_changes_transactionally_locked(
                         item["staged_new"],
                     )
                 )
-                staged_paths.add(item["staged_new"])
                 item["staged_new_identity"] = _path_identity(item["staged_new"])
+                if item["staged_new_identity"] is None:
+                    raise ConfigurationError(
+                        f"Staged replacement disappeared for {item['path']}."
+                    )
                 item["installed_identity"] = item["staged_new_identity"]
                 item["installed_metadata_sha256"] = _metadata_digest(
                     item["staged_new"]
                 )
+                if _sha256_file(item["staged_new"]) != _sha256_text(item["new"]):
+                    raise ConfigurationError(
+                        f"Staged replacement content mismatch for {item['path']}."
+                    )
+                staged_paths[item["staged_new"]] = item["staged_new_identity"]
             if isinstance(item["staged_old"], Path):
                 item["staged_old"] = stage_existing_file(
                     item["path"], item["old"], item["staged_old"]
                 )
-                staged_paths.add(item["staged_old"])
                 item["staged_old_identity"] = _path_identity(item["staged_old"])
+                if item["staged_old_identity"] is None:
+                    raise ConfigurationError(
+                        f"Staged recovery copy disappeared for {item['path']}."
+                    )
                 item["staged_old_metadata_sha256"] = _metadata_digest(
                     item["staged_old"]
                 )
+                if _sha256_file(item["staged_old"]) != _sha256_text(item["old"]):
+                    raise ConfigurationError(
+                        f"Staged recovery content mismatch for {item['path']}."
+                    )
+                staged_paths[item["staged_old"]] = item["staged_old_identity"]
             if isinstance(item["tombstone"], Path):
                 item["tombstone"] = stage_text(
-                    item["path"], "", item["mode"], item["tombstone"]
+                    item["path"], "", 0o600, item["tombstone"]
                 )
-                staged_paths.add(item["tombstone"])
                 item["tombstone_placeholder_identity"] = _path_identity(
                     item["tombstone"]
                 )
+                if item["tombstone_placeholder_identity"] is None:
+                    raise ConfigurationError(
+                        f"Tombstone placeholder disappeared for {item['path']}."
+                    )
+                staged_paths[item["tombstone"]] = item[
+                    "tombstone_placeholder_identity"
+                ]
             if item["existed"]:
                 item["source_metadata"] = _metadata_signature(item["path"])
                 for candidate in (item["staged_new"], item["staged_old"]):
@@ -2340,6 +3006,7 @@ def _apply_changes_transactionally_locked(
                         item["identity"],
                         item["tombstone_placeholder_identity"],
                     )
+                    staged_paths[item["tombstone"]] = item["identity"]
                     _replace_staged_atomically(
                         item["staged_new"],
                         item["path"],
@@ -2348,6 +3015,7 @@ def _apply_changes_transactionally_locked(
                         item["identity"],
                         item["source_metadata"],
                         _sha256_text(item["old"]),
+                        _sha256_text(item["new"]),
                     )
                 else:
                     os.link(
@@ -2360,9 +3028,11 @@ def _apply_changes_transactionally_locked(
                         raise ConfigurationError(
                             f"New destination identity could not be verified: {item['path']}."
                         )
-                    item["staged_new"].unlink()
+                    _unlink_exact(
+                        item["staged_new"], item["staged_new_identity"]
+                    )
                     _fsync_directory(item["path"].parent)
-                staged_paths.discard(item["staged_new"])
+                staged_paths.pop(item["staged_new"], None)
             else:
                 _move_original_to_tombstone(
                     item["path"],
@@ -2372,6 +3042,7 @@ def _apply_changes_transactionally_locked(
                     item["source_metadata"],
                     _sha256_text(item["old"]),
                 )
+                staged_paths[item["tombstone"]] = item["identity"]
 
         for item in prepared:
             if item["new"]:
@@ -2393,8 +3064,13 @@ def _apply_changes_transactionally_locked(
                 raise ConfigurationError(
                     f"Deleted destination reappeared during apply: {item['path']}."
                 )
-            if read_text(item["path"]) != item["new"]:
-                raise ConfigurationError(f"Final readback failed for {item['path']}.")
+            observed = read_text(item["path"])
+            if observed != item["new"]:
+                observed_state = "original" if observed == item["old"] else "other"
+                raise ConfigurationError(
+                    f"Final readback failed for {item['path']}: "
+                    f"observed_state={observed_state}."
+                )
             _fsync_directory(item["path"].parent)
 
         payload["phase"] = "committed"
@@ -2412,9 +3088,9 @@ def _apply_changes_transactionally_locked(
                     raise ConfigurationError(
                         f"Committed tombstone identity changed: {tombstone}."
                     )
-                tombstone.unlink()
+                _unlink_exact(tombstone, item["identity"])
                 _fsync_directory(tombstone.parent)
-                staged_paths.discard(tombstone)
+                staged_paths.pop(tombstone, None)
             except (ConfigurationError, OSError) as cleanup_exc:
                 cleanup_errors.append(f"{tombstone}: {cleanup_exc}")
         if cleanup_errors:
@@ -2424,10 +3100,10 @@ def _apply_changes_transactionally_locked(
                 "the transaction journal was kept for the next run: "
                 + "; ".join(cleanup_errors)
             )
-        for staged in list(staged_paths):
-            staged.unlink(missing_ok=True)
+        for staged, staged_identity in list(staged_paths.items()):
+            _unlink_exact(staged, staged_identity, missing_ok=True)
             _fsync_directory(staged.parent)
-            staged_paths.discard(staged)
+            staged_paths.pop(staged, None)
         _remove_transaction_journal(root)
         journal_active = False
     except BaseException as exc:
@@ -2491,10 +3167,10 @@ def _apply_changes_transactionally_locked(
                 f"{detail}; recovery journal kept at {journal}"
             ) from exc
         try:
-            for staged in list(staged_paths):
-                staged.unlink(missing_ok=True)
+            for staged, staged_identity in list(staged_paths.items()):
+                _unlink_exact(staged, staged_identity, missing_ok=True)
                 _fsync_directory(staged.parent)
-                staged_paths.discard(staged)
+                staged_paths.pop(staged, None)
             if journal_active:
                 _remove_transaction_journal(root)
                 journal_active = False
@@ -2519,8 +3195,8 @@ def _apply_changes_transactionally_locked(
         raise
     finally:
         if not preserve_staged:
-            for staged in list(staged_paths):
-                staged.unlink(missing_ok=True)
+            for staged, staged_identity in list(staged_paths.items()):
+                _unlink_exact(staged, staged_identity, missing_ok=True)
 
 
 def backup_change(path: Path, content: str, base: Path) -> tuple[Path, str, str]:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import getpass
 import hashlib
 import importlib.util
@@ -160,6 +160,47 @@ class ConfigureOrchestrationTests(unittest.TestCase):
             base / "agents" / CONFIGURE.EXECUTOR_FILENAME,
             base / "agents" / CONFIGURE.ADVISOR_FILENAME,
         )
+
+    def test_low_level_staging_requests_binary_descriptors_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "agent.toml"
+            staged = root / "staged.toml"
+            path.write_bytes(b"old\n")
+            real_open = os.open
+            synthetic_binary_flag = 1 << 29
+            observed_flags: list[int] = []
+
+            def tracked_open(
+                candidate: object,
+                flags: int,
+                mode: int = 0o777,
+                **kwargs: object,
+            ) -> int:
+                observed_flags.append(flags)
+                return real_open(
+                    candidate,
+                    flags & ~synthetic_binary_flag,
+                    mode,
+                    **kwargs,
+                )
+
+            with (
+                mock.patch.object(
+                    CONFIGURE.os,
+                    "O_BINARY",
+                    synthetic_binary_flag,
+                    create=True,
+                ),
+                mock.patch.object(CONFIGURE.os, "open", side_effect=tracked_open),
+            ):
+                CONFIGURE.stage_existing_file(path, "new\n", staged)
+
+            self.assertGreaterEqual(len(observed_flags), 3)
+            self.assertTrue(
+                all(flags & synthetic_binary_flag for flags in observed_flags)
+            )
+            self.assertEqual(staged.read_bytes(), b"new\n")
 
     @staticmethod
     def prepared_fallback_state(root: Path) -> tuple[Path, Path, dict[str, object]]:
@@ -1227,6 +1268,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal injected
                 if Path(destination) == advisor and not injected:
@@ -1240,6 +1282,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
@@ -1313,6 +1356,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal second_failed
                 destination_path = Path(destination)
@@ -1327,6 +1371,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             def fail_first_rollback(
@@ -1407,6 +1452,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal interrupted
                 if destination == second and not interrupted:
@@ -1420,6 +1466,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
@@ -1898,6 +1945,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal injected
                 if not injected:
@@ -1911,6 +1959,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
@@ -2078,31 +2127,194 @@ multi_agent = true'''
             self.assertEqual(path.read_text(encoding="utf-8"), "usr\n")
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
-    def test_windows_existing_file_update_fails_closed(self) -> None:
+    def test_staged_content_change_is_rejected_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "agent.toml"
+            path.write_text("old\n", encoding="utf-8")
+            real_replace = CONFIGURE._replace_staged_atomically
+            injected = False
+
+            def mutate_staged_then_replace(*args: object) -> None:
+                nonlocal injected
+                staged = Path(args[0])
+                if not injected:
+                    before = staged.stat(follow_symlinks=False)
+                    staged.write_text("bad\n", encoding="utf-8", newline="")
+                    os.utime(
+                        staged,
+                        ns=(before.st_atime_ns, before.st_mtime_ns),
+                    )
+                    injected = True
+                real_replace(*args)
+
+            with mock.patch.object(
+                CONFIGURE,
+                "_replace_staged_atomically",
+                side_effect=mutate_staged_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    CONFIGURE.ConfigurationError,
+                    "metadata changed before publication",
+                ) as raised:
+                    CONFIGURE.apply_changes_transactionally(
+                        [(path, "old\n", "new\n")],
+                        transaction_root=root,
+                    )
+
+            self.assertTrue(injected)
+            self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
+            self.assertNotIn("bad", str(raised.exception))
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
+    def test_windows_existing_file_update_preserves_security_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / "agent.toml"
             # Keep the fixture byte-exact on Windows; the production reader uses
             # newline="" so CRLF translation must not mask the intended branch.
             path.write_bytes(b"old\n")
+            icacls = shutil.which("icacls")
+            self.assertIsNotNone(icacls)
+            protected = subprocess.run(
+                [icacls, str(path), "/inheritance:d"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(protected.returncode, 0, protected.stderr)
+            before = CONFIGURE._windows_security_signature(path)
+            self.assertIsNotNone(before)
+            inherited = root / "inherited.toml"
+            inherited.write_bytes(b"fixture\n")
+            self.assertNotEqual(
+                CONFIGURE._windows_security_signature(inherited), before
+            )
+            CONFIGURE.apply_changes_transactionally(
+                [(path, "old\n", "new\n")],
+                transaction_root=root,
+            )
+            self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(CONFIGURE._windows_security_signature(path), before)
+            self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
-            with (
-                mock.patch.object(CONFIGURE.os, "name", "nt"),
-                mock.patch.object(
-                    CONFIGURE,
-                    "_transaction_directory_lock",
-                    return_value=nullcontext(),
-                ),
+    def test_windows_named_security_information_preserves_acl_protection(self) -> None:
+        base = 0x00000001 | 0x00000002 | 0x00000004
+        self.assertEqual(
+            CONFIGURE._windows_named_security_information(0, has_label=False),
+            base | 0x20000000,
+        )
+        self.assertEqual(
+            CONFIGURE._windows_named_security_information(0x1000, has_label=False),
+            base | 0x80000000,
+        )
+        self.assertEqual(
+            CONFIGURE._windows_named_security_information(0x3000, has_label=True),
+            base | 0x00000010 | 0x80000000 | 0x40000000,
+        )
+
+    def test_windows_sddl_mismatch_summary_withholds_acl_contents(self) -> None:
+        expected = (
+            'O:S-1-5-21-111G:S-1-5-21-222D:AI'
+            '(XA;ID;FA;;;S-1-5-21-333;(@USER.Dept=="D:SECRET"))'
+        )
+        actual = (
+            'O:S-1-5-21-111G:S-1-5-21-222D:ARAI'
+            '(XA;ID;FA;;;S-1-5-21-444;(@USER.Dept=="S:PRIVATE"))'
+        )
+
+        summary = CONFIGURE._windows_sddl_mismatch_summary(expected, actual)
+
+        self.assertIn("owner_equal=True", summary)
+        self.assertIn("group_equal=True", summary)
+        self.assertIn("dacl_equal=False", summary)
+        self.assertIn("expected_dacl_flags=AI", summary)
+        self.assertIn("actual_dacl_flags=ARAI", summary)
+        self.assertIn("expected_dacl_aces=1", summary)
+        self.assertIn("actual_dacl_aces=1", summary)
+        self.assertNotIn("S-1-5-21", summary)
+        self.assertNotIn("SECRET", summary)
+        self.assertNotIn("PRIVATE", summary)
+        self.assertNotIn("@USER", summary)
+
+        malformed = CONFIGURE._windows_sddl_mismatch_summary("D:SECRET", "D:AI")
+        self.assertIn("expected_dacl_flags=unrecognized", malformed)
+        self.assertNotIn("SECRET", malformed)
+
+    def test_existing_read_only_file_update_preserves_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "read-only.toml"
+            path.write_bytes(b"old\n")
+            path.chmod(0o400)
+            expected_mode = path.stat().st_mode & 0o777
+            try:
+                CONFIGURE.apply_changes_transactionally(
+                    [(path, "old\n", "new\n")], transaction_root=root
+                )
+                self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+                self.assertEqual(path.stat().st_mode & 0o777, expected_mode)
+                self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
+            finally:
+                path.chmod(0o600)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
+    def test_windows_inherited_dacl_survives_existing_file_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inherited_root = root / "inherited"
+            inherited_root.mkdir()
+            icacls = shutil.which("icacls")
+            self.assertIsNotNone(icacls)
+            prepared = subprocess.run(
+                [
+                    icacls,
+                    str(inherited_root),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"{getpass.getuser()}:(OI)(CI)F",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            path = inherited_root / "agent.toml"
+            path.write_bytes(b"old\n")
+            before = CONFIGURE._windows_security_signature(path)
+            self.assertIsNotNone(before)
+            assert before is not None
+            self.assertIn("D:AI", before)
+            self.assertIn("ID", before)
+
+            CONFIGURE.apply_changes_transactionally(
+                [(path, "old\n", "new\n")],
+                transaction_root=inherited_root,
+            )
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(CONFIGURE._windows_security_signature(path), before)
+            self.assertFalse(
+                (inherited_root / CONFIGURE.TRANSACTION_JOURNAL).exists()
+            )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
+    def test_windows_security_descriptor_failure_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "agent.toml"
+            path.write_bytes(b"old\n")
+            with mock.patch.object(
+                CONFIGURE,
+                "_set_windows_security_descriptor",
+                side_effect=CONFIGURE.ConfigurationError("injected descriptor failure"),
             ):
                 with self.assertRaisesRegex(
-                    CONFIGURE.ConfigurationError,
-                    "NTFS security descriptors",
+                    CONFIGURE.ConfigurationError, "injected descriptor failure"
                 ):
                     CONFIGURE.apply_changes_transactionally(
-                        [(path, "old\n", "new\n")],
-                        transaction_root=root,
+                        [(path, "old\n", "new\n")], transaction_root=root
                     )
-
             self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
@@ -2170,6 +2382,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal injected
                 if destination == failing and not injected:
@@ -2183,6 +2396,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
