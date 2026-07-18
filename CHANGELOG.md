@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.5.3 — Unreleased
+## 0.5.4 — Unreleased
+
+- Bypass ambient proxy settings only for exact localhost Python-API Fable endpoints, so a local CC Switch route cannot be diverted through an external proxy; preserve default proxy behavior for remote endpoints.
+
+## 0.5.3
 
 - Accept the App Server's null effective readback for a removed legacy thread limit while retaining conflict detection for every concrete legacy limit.
 

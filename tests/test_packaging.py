@@ -24,7 +24,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.5.3")
+        self.assertEqual(manifest["version"], "0.5.4")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -47,7 +47,7 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(routing_state.is_file())
         self.assertTrue(fable_api.is_file())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.5.3"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.5.4"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
         self.assertIn("credential-stdin", fable_api.read_text(encoding="utf-8"))
@@ -118,7 +118,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.5.3"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.5.4"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
