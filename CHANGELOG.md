@@ -1,6 +1,22 @@
 # Changelog
 
-## 0.7.1 — Unreleased
+## 0.7.2 — Unreleased
+
+- Enable implicit skill discovery for natural-language Kimi K3, External Model,
+  and model-role availability questions. The previous metadata required an explicit
+  plugin mention, so an untagged question could bypass the lifecycle and incorrectly
+  infer that Kimi was unavailable from the visible Fable tools alone.
+- Treat implicit availability questions as read-only status checks: report bundled
+  support, local configuration, and current-task callability separately without
+  authorizing setup, credentials, provider writes, role creation, or spend.
+- Replace the verbose normalized routing summary with one concise activation line
+  per explicitly supplied model-bearing seat, preserving the user's seat order and
+  using the `Role — Model effort: Activated` wording.
+- Reserve `Activated` for routes that are genuinely ready and callable in the
+  current task. External authentication, qualification, connection, restart, and
+  resolution boundaries continue to report their exact state and next action.
+
+## 0.7.1 — 2026-07-18
 
 - Recognize a bare `Designer: Kimi K3` seat assignment as the audited task-local
   External Model role `designer` instead of incorrectly reporting the route as

@@ -110,6 +110,30 @@ Fable 5 uses the official Claude Code CLI and a compatible first-party Claude lo
 
 Role labels are literal. A model after `planner:` plans; a model after `advisor:` reviews; a model after `designer:` designs; a model after `executor:` implements. Codex must never move a model to a different role because that model was used differently in an older plugin version. If you omit Designer, the workflow has no Designer. If you specify Planner and Executor but omit Advisor, the workflow has no Advisor.
 
+When every requested route is ready in the current task, the plugin confirms only
+the roles you supplied, in your order:
+
+```text
+Planner — Fable 5 high: Activated
+Designer — Kimi K3: Activated
+Executor — GPT-5.6 Sol high: Activated
+```
+
+`Activated` means the route is ready and callable for that task. If an external
+model still needs authentication, qualification, connection, or a restart, the
+plugin reports that exact state and next action instead of claiming activation.
+
+You can also ask naturally without selecting the skill first:
+
+```text
+is Kimi available to use as Designer?
+```
+
+The plugin checks its External Model registry instead of guessing from the visible
+tool list. It distinguishes whether Kimi K3 is bundled and supported, configured on
+this installation, and callable in the current task. A question performs read-only
+status inspection only; it never authorizes configuration, credentials, or spend.
+
 Examples:
 
 ```text
@@ -248,7 +272,8 @@ codex plugin add codex-orchestration@codex-orchestration
 
 Version **0.6.0 or newer** is required for External Model roles; version **0.7.0
 or newer** adds `--update`, routing repair, and Designer; version **0.7.1 or newer**
-lets the natural `Designer: Kimi K3` label enter the External Model lifecycle.
+lets the natural `Designer: Kimi K3` label enter the External Model lifecycle;
+version **0.7.2 or newer** uses the concise per-role activation confirmation.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 

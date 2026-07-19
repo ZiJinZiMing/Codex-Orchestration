@@ -1,6 +1,6 @@
 ---
 name: codex-orchestration
-description: Build multi-model Codex workflows by assigning compatible models to roles such as planner, advisor, designer, executor, researcher, reviewer, writer, or supervisor. Use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
+description: Use for natural-language questions or requests about whether Kimi K3 or another audited External Model is available or callable as Designer or another role, and for assigning models to Planner, Advisor, Designer, Executor, researcher, reviewer, writer, or supervisor roles. Also use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
 ---
 
 # Codex Orchestration
@@ -29,7 +29,31 @@ Support these simple forms:
 /codex-orchestration disable
 /codex-orchestration remove custom roles personally
 /codex-orchestration executor: GPT-5.6 Terra high — <one task only>
+is Kimi available to use as Designer?
+can I use Kimi K3 for design?
 ```
+
+Implicit invocation is discovery, not mutation authority. A natural-language
+availability question authorizes only read-only inspection. It never authorizes
+setup, repair, provider preparation, authentication, Gate 0 spend, role creation,
+configuration writes, disconnect, or removal.
+
+For a question such as `is Kimi available to use as Designer?`, enter this skill
+implicitly and run `external status` from the installed skill before answering.
+Never infer External Model availability from the currently exposed MCP or subagent
+tool list. A visible Fable tool is not an exhaustive provider or role inventory.
+Report the result in three separate terms:
+
+- `supported`: the exact display name maps to a bundled audited manifest;
+- `configured`: the exact provider/model/effort and role exist without drift;
+- `callable now`: status is `READY` and read-only `resolve` succeeds for the exact
+  role and effort in the current workspace.
+
+Say Kimi K3 is available to use as Designer only when all three are true. Otherwise,
+say it is supported but not yet callable, name the exact lifecycle state, and give
+the next action. Never answer that the plugin does not expose Kimi merely because a
+Kimi-specific tool is absent; the route is materialized through the External Model
+lifecycle and a provider-pinned custom agent.
 
 `--update` securely refreshes this plugin from its canonical Git marketplace. `setup` installs or updates the personal one-time routing policy. `create project role` or `create personal role` creates native Codex custom-agent files. `status` inspects built-in routing. `repair` restores only saved managed hint bytes after narrow drift validation. `disable` restores pre-setup values.
 
@@ -55,7 +79,43 @@ Because explicit skills may not reload from a bare reply, include a ready-to-cop
 
 For a task-local request, append `— <original task>`. Keep every supplied modifier. Do not lose the user's task while collecting a model choice.
 
-Before applying setup or starting task-local work, report the normalized mapping as `Planner`, `Advisor`, `Designer`, and `Executor` in that order. Compare it with the user's explicit labels. If an exact native seat cannot run, report that seat as unavailable and stop under the required-route rules; never move its model to another seat. For an External Model seat still crossing a valid lifecycle boundary, report its exact lifecycle state and next action, not unavailable. When the user omits Designer, report `Designer: none`; when the user supplies Planner and Executor but omits Advisor, report `Advisor: none`.
+Before applying setup or starting task-local work, validate the normalized mapping
+internally against the user's explicit labels. If an exact native seat cannot run,
+report that seat as unavailable and stop under the required-route rules; never move
+its model to another seat. For an External Model seat still crossing a valid
+lifecycle boundary, report its exact lifecycle state and next action, not unavailable.
+Status and diagnostic commands may show omitted defaults explicitly,
+including `Designer: none` and `Advisor: none`; a successful activation
+confirmation follows the concise contract below instead.
+
+### Activation confirmation
+
+After all requested task-local routes have been validated as callable in the
+current task, respond with one plain line per explicitly supplied model-bearing seat
+and preserve the user's seat order. Use this exact shape:
+
+```text
+Planner — Fable 5 high: Activated
+Designer — Kimi K3: Activated
+Executor — GPT-5.6 Sol high: Activated
+```
+
+Keep the role and model recognizable to the user. Normalize stable product
+punctuation such as `GPT-5.6`, and render a supplied effort in lower-case readable
+words; internal values such as `xhigh` remain routing details. Do not
+append a defaulted effort that the user omitted; for example, the implicit Kimi K3
+`max` remains part of route validation but not the display line.
+Do not print omitted, `none`, or implicit-root seats. On a role-selection-only invocation, the
+activation lines are the entire successful response: do not add a heading,
+preamble, route internals, or delegation boilerplate.
+
+Use `Activated` only after that exact route is ready and callable in the current
+task. It means available for this task, not `used and confirmed` runtime identity.
+If authentication, qualification, connection, restart, resolution, or another
+required boundary remains, report the exact lifecycle state and next action instead of `Activated`.
+Never mix a false activation line into a blocker response. For a
+request that also contains task work, print the activation lines first and then
+continue that work.
 
 If an old prompt contains `orchestrator:`, explain that the current task model already owns that role. Ignore that seat instead of switching or persisting it.
 
@@ -375,7 +435,9 @@ For personal v0.4 custom roles, preview and apply removal with `configure_orches
 
 Use this built-in route when the user names Claude Fable 5. Do not create a custom provider or custom-agent file for it.
 
-In every user-facing status or result, use the exact name `Claude Fable 5`. Report authentication as `first-party login ready`; do not expose or restate Claude account-plan metadata.
+In user-facing diagnostic status or operation results, use the exact name `Claude Fable 5`.
+The concise activation confirmation preserves the supplied `Fable 5` label when that is what the user wrote, as shown in its exact example.
+Report authentication as `first-party login ready`; do not expose or restate Claude account-plan metadata.
 
 Prerequisites:
 
@@ -575,17 +637,10 @@ Use the strongest exact control the current client exposes:
 
 For task-local `auto`, omit the reasoning-effort input. Never pass the literal string `auto` to a spawn tool; the effective inherited or host-chosen effort remains unverified unless the client exposes it.
 
-Report a compact activation status and continue the included task:
-
-```text
-Codex Orchestration
-Orchestrator: <active model or current task model> — active
-Planner: <model>@<effort> — <route state>, or root
-Advisor: <model>@<effort> — <route state>, or none
-Designer: <model>@<effort> — <route state>, or none
-Executor: <model>@<effort> — <route state>
-Delegation: Codex decides when it helps; Plan and Goal behavior unchanged
-```
+When every supplied fallback route is ready, use the same concise activation
+confirmation contract above and continue the included task. When any route is not
+ready, report only the affected seat's exact route state, blocker, and next action;
+do not label it `Activated`.
 
 Never report a prompt preference or saved file as a model that actually ran. Report an exact tool call as `route accepted`; reserve runtime confirmation for explicit effective metadata.
 
