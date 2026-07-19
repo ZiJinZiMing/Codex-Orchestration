@@ -102,10 +102,26 @@ Claude settings, CC Switch, or the subscription adapter. The JSON config contain
 the API key in plaintext and must remain protected by the user's account ACL and
 must never be committed, logged, or shared.
 
-Routing schema/policy version 4 adds the optional Designer field while retaining
-strict validation for schemas 1–3. Legacy schemas cannot smuggle a Designer key,
-and persistent Designer accepts only a direct same-provider model, never the
-privileged Fable MCP route or a project-shadowable unqualified agent name.
+The optional Python API Designer is a second, independent explicit transport with
+its own `.codex-orchestration-designer-api.json` secret file and MCP launcher
+family. It applies the same endpoint, file-integrity, no-argv-secret, redirect,
+retry, fallback, proxy, and bounded-diagnostic controls. Routing fingerprints bind
+the non-secret provider, endpoint, exact model, protocol, auth type, and token bound
+but deliberately exclude the credential so a key may rotate without rewriting
+routing state. Runtime additionally requires exact model echo, `end_turn`, and a
+first non-empty line of `DESIGN_COMPLETE` followed by a non-empty body. The bridge
+is stateless, exposes only `create_design` and non-secret status, and cannot invoke
+tools, edit files, persist a provider session, or contact another seat. Its local
+JSON key has the same plaintext-file handling requirement as the Advisor config.
+
+Routing schema/policy version 5 adds the API Designer route while retaining strict
+validation for schemas 1–4. Legacy schemas cannot smuggle a newer Designer shape;
+schema 5 may enable an independent Fable and Designer launcher at the same time.
+Persistent Designer accepts only a direct same-provider model or the exact dedicated
+API route, never the privileged Fable MCP route or a project-shadowable unqualified
+agent name. Schemas 1–4 are accepted without rewriting and migrate only on explicit
+setup. Older plugins fail closed on schema 5, so users must disable with version
+0.9 before downgrading.
 Cross-provider/custom Designers remain task-local and require current-project
 validation immediately before use. Designer authority is
 policy-bounded: it reports only to root, cannot contact other seats or spawn

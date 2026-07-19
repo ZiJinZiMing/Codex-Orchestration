@@ -45,6 +45,21 @@ def fable_api_route() -> dict[str, str]:
     }
 
 
+def designer_api_route() -> dict[str, str]:
+    return {
+        "kind": "designer-api",
+        "provider": "kimi",
+        "model": "k3",
+        "wire_api": "anthropic-messages",
+        "endpoint_sha256": "a" * 64,
+        "config_sha256": "b" * 64,
+        "server": "designer-api-python",
+        "transport": STATE.DESIGNER_API_TRANSPORT,
+        "api_source": STATE.DESIGNER_API_SOURCE,
+        "path": STATE.DESIGNER_API_PATH,
+    }
+
+
 def genuine_state(schema: int) -> dict[str, object]:
     managed: dict[str, object] = {
         "mode": f"{STATE.MANAGED_MARKER}\nmode body",
@@ -74,7 +89,7 @@ def genuine_state(schema: int) -> dict[str, object]:
         state["advisor"] = fable_route()
     if schema >= 3:
         state["planner"] = fable_route()
-    if schema == 4:
+    if schema >= 4:
         state["designer"] = {
             "kind": "model",
             "model": "gpt-designer",
@@ -93,11 +108,37 @@ def genuine_state(schema: int) -> dict[str, object]:
 
 
 class RoutingStateTests(unittest.TestCase):
-    def test_genuine_schemas_one_through_four_are_accepted(self) -> None:
-        for schema in (1, 2, 3, 4):
+    def test_genuine_schemas_one_through_five_are_accepted(self) -> None:
+        for schema in (1, 2, 3, 4, 5):
             with self.subTest(schema=schema):
                 state = genuine_state(schema)
                 self.assertIs(STATE.validate_routing_state(state), state)
+
+    def test_schema_five_accepts_exact_designer_api_and_two_launcher_families(self) -> None:
+        state = genuine_state(5)
+        state["designer"] = designer_api_route()
+        state["managed"]["mcp"]["designer-api-python"] = True
+        state["previous"]["mcp"]["designer-api-python"] = snapshot()
+        self.assertIs(STATE.validate_routing_state(state), state)
+        legacy = deepcopy(state)
+        legacy["schema"] = 4
+        legacy["policy_version"] = 4
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(legacy)
+
+        for mutate in (
+            lambda route: route.update(provider="Bad.Provider"),
+            lambda route: route.update(wire_api="responses"),
+            lambda route: route.update(config_sha256="0"),
+            lambda route: route.update(server="fable-advisor-python"),
+        ):
+            changed = genuine_state(5)
+            changed["designer"] = designer_api_route()
+            changed["managed"]["mcp"] = {"designer-api-python": True}
+            changed["previous"]["mcp"] = {"designer-api-python": snapshot()}
+            mutate(changed["designer"])
+            with self.assertRaises(STATE.RoutingStateError):
+                STATE.validate_routing_state(changed)
 
     def test_scalar_conversion_and_retained_disabled_mcp_are_accepted(self) -> None:
         state = genuine_state(3)

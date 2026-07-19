@@ -674,8 +674,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 4)
-        self.assertEqual(state["policy_version"], 4)
+        self.assertEqual(state["schema"], 5)
+        self.assertEqual(state["policy_version"], 5)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -684,8 +684,8 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Designer: gpt-5.6-luna@medium", status.stdout)
         self.assertEqual(status.returncode, 0)
 
-    def test_legacy_state_schemas_upgrade_to_four_without_losing_restore(self) -> None:
-        for legacy_schema in (1, 2, 3):
+    def test_legacy_state_schemas_upgrade_to_five_without_losing_restore(self) -> None:
+        for legacy_schema in (1, 2, 3, 4):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
                 if legacy_schema == 2:
@@ -699,7 +699,8 @@ class NativeRoutingTests(unittest.TestCase):
                 legacy["policy_version"] = legacy_schema
                 if legacy_schema < 3:
                     legacy.pop("planner", None)
-                legacy.pop("designer", None)
+                if legacy_schema < 4:
+                    legacy.pop("designer", None)
                 legacy["managed"]["mode"] = (
                     f"{NATIVE.MANAGED_MARKER}\nlegacy schema {legacy_schema} mode"
                 )
@@ -726,8 +727,8 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 4)
-                self.assertEqual(upgraded["policy_version"], 4)
+                self.assertEqual(upgraded["schema"], 5)
+                self.assertEqual(upgraded["policy_version"], 5)
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
@@ -746,7 +747,14 @@ class NativeRoutingTests(unittest.TestCase):
         state_path = self.home / NATIVE.STATE_FILENAME
         current = json.loads(state_path.read_text(encoding="utf-8"))
 
-        for schema, wrong_policy in ((1, 2), (2, 3), (3, 4), (4, 1), (4, True)):
+        for schema, wrong_policy in (
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 1),
+            (5, True),
+        ):
             with self.subTest(schema=schema, policy=wrong_policy):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema

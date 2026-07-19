@@ -125,12 +125,24 @@ The explicit label `advisor: Claude Fable 5 Python API` selects only the bundled
 config-file API Advisor route. Map it to `--advisor-fable-api --advisor-effort
 <normalized-effort>`. Never infer this route from a generic Fable label, an API
 key, environment variables, Claude settings, CC Switch, or the configured URL.
-Python API is not valid for Planner, Designer, Executor, or arbitrary roles.
+This Python API route is not valid for Planner, Designer, Executor, or arbitrary
+roles.
 
-Persistent Designer accepts only a direct same-provider model, not a Fable MCP
-or unqualified custom-agent route. Route it with `--designer-model` plus
-`--designer-effort`. A Designer route may share a model with another seat; only
-Planner and Advisor require independent routes. For a cross-provider Designer,
+The explicit label `designer: Kimi K3 Python API` selects only the bundled
+config-file API Designer route. Map it to `--designer-api` with no
+`--designer-effort`. Never infer this route from `Designer: Kimi K3`, another
+generic Kimi label, an API key, environment variables, Claude Code, CC Switch,
+OpenRouter state, or the configured URL. It reads only
+`~/.codex/.codex-orchestration-designer-api.json`, created by
+`scripts/configure_designer_api.py`. The config may name another reviewed
+Anthropic Messages provider/model mapping; the label selects the role and transport,
+not a hard-coded provider identity.
+
+Persistent Designer accepts either that exact config-file API route or a direct
+same-provider model, not a Fable MCP or unqualified custom-agent route. Route a
+same-provider model with `--designer-model` plus `--designer-effort`. A Designer
+route may share a model with another seat; only Planner and Advisor require
+independent routes. For a cross-provider External Model Designer,
 create and invoke a task-local External Model role named `designer`; `resolve` must
 reject matching project agents in the current workspace or any ancestor immediately
 before returning its route. Codex does not yet expose a scope-qualified agent identity,
@@ -355,10 +367,13 @@ Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. 
 Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Claude Fable 5, use `--planner-fable`; add `--planner-effort low|medium|high|xhigh|max` when the user chooses one. Planner omission persists no Planner route and means the root plans. A configured Planner and Advisor must not resolve to the same model or agent route; independent review is required.
 
 Add `--designer-model` and `--designer-effort` for a persistent same-provider
-Designer. Designer omission persists `designer: none`. Designer cannot use the
-Fable MCP route or a persistent custom-agent name. Use a task-local External Model
-role named `designer` for cross-provider design work so the root can validate its
-personal file and reject project shadowing immediately before the bounded call.
+Designer. Use `--designer-api` for the explicit config-file Python API Designer;
+it is mutually exclusive with `--designer-model`, and an explicit
+`--designer-effort` must be rejected for this transport. Designer omission persists
+`designer: none`. Designer cannot use the Fable MCP route or a persistent
+custom-agent name. Use a task-local External Model role named `designer` for other
+cross-provider design work so the root can validate its personal file and reject
+project shadowing immediately before the bounded call.
 
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
@@ -450,8 +465,8 @@ exact provider model mapping, and bearer or `x-api-key` authentication. Secrets
 must come from the hidden prompt or `--credential-stdin`, never argv, chat,
 environment variables, Claude settings, or CC Switch. Missing, disabled, unsafe,
 malformed, redirected, timed-out, or model-mismatched API configuration fails
-closed and never falls back to the subscription adapter. The API route is
-Advisor-only; Planner and Designer retain their existing designs.
+closed and never falls back to the subscription adapter. This API route is
+Advisor-only; the separate Designer API route has its own config and launcher.
 
 Python API setup and status validate configuration without making a model call.
 `review_plan` makes one request with no retry, tools, permission prompts, or
@@ -637,6 +652,16 @@ the approved plan, and decides what implementation packet Executor receives. A
 Designer may use the same model as another seat because independent critique is not
 its purpose; the Planner/Advisor route-separation rule remains unchanged.
 
+For a configured Python API Designer, only root calls `create_design` on the
+selected `designer-api-*` MCP server. Send one self-contained packet and require
+the first non-empty response line to be exactly `DESIGN_COMPLETE` followed by a
+non-empty design body. This transport is stateless and read-only: it cannot edit
+artifacts, use tools, persist a session, contact another seat, or release Executor.
+Any missing config, saved-config drift, redirect, timeout, refusal, malformed
+response, mismatched model echo, non-`end_turn` stop, missing sentinel, or empty
+body makes Designer unavailable and never triggers a retry, alternate provider,
+OpenRouter role, Claude Code, environment credential, or other fallback.
+
 ## Executor handoff
 
 Give each executor one bounded packet with:
@@ -685,6 +710,8 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 - `scripts/configure_native_routing.py`: one-time native setup, status, seat changes, and disable.
 - `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 planning and review bridge.
 - `scripts/configure_fable_api.py`: secret-safe dedicated Python API Advisor configuration.
+- `scripts/designer_api_mcp.py`: fail-closed direct Python API Designer bridge.
+- `scripts/configure_designer_api.py`: secret-safe dedicated Python API Designer configuration.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
 - `scripts/external_configurator.py`: preview-first External Model provider, Gate 0, role, status, recovery, and removal lifecycle.

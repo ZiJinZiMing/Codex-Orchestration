@@ -25,6 +25,9 @@ import time
 from typing import Any
 
 from routing_state import (
+    DESIGNER_API_PATH,
+    DESIGNER_API_SOURCE,
+    DESIGNER_API_TRANSPORT,
     FABLE_API_PATH,
     FABLE_API_SOURCE,
     FABLE_API_TRANSPORT,
@@ -42,8 +45,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 4
-STATE_SCHEMA = 4
+POLICY_VERSION = 5
+STATE_SCHEMA = 5
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
@@ -55,6 +58,12 @@ FABLE_SERVERS = {
     "fable-advisor-python": ("python", []),
     "fable-advisor-py": ("py", ["-3.11"]),
 }
+DESIGNER_API_SERVERS = {
+    "designer-api-python3": ("python3", []),
+    "designer-api-python": ("python", []),
+    "designer-api-py": ("py", ["-3.11"]),
+}
+MCP_SERVERS = {**FABLE_SERVERS, **DESIGNER_API_SERVERS}
 RPC_TIMEOUT_SECONDS = 20
 PROBE_TIMEOUT_SECONDS = 15
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
@@ -145,11 +154,17 @@ def parse_args() -> argparse.Namespace:
         help="Exact supported advisor effort, or auto.",
     )
 
-    parser.add_argument("--designer-model", help="Optional exact designer model ID.")
+    designer = parser.add_mutually_exclusive_group()
+    designer.add_argument("--designer-model", help="Optional exact designer model ID.")
+    designer.add_argument(
+        "--designer-api",
+        action="store_true",
+        help="Use the configured direct Python API Designer.",
+    )
     parser.add_argument(
         "--designer-effort",
-        default="auto",
-        help="Exact supported designer effort, or auto.",
+        default=None,
+        help="Exact supported designer effort, or auto; valid only with --designer-model.",
     )
 
     parser.add_argument("--codex-bin", default="codex")
@@ -200,10 +215,11 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_fable,
             args.advisor_fable_api,
             args.designer_model,
+            args.designer_api,
             args.executor_effort != "auto",
             args.planner_effort != "auto",
             args.advisor_effort != "auto",
-            args.designer_effort != "auto",
+            args.designer_effort is not None,
         )
     )
     for action, selected in (
@@ -238,6 +254,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "A custom advisor agent owns its effort; omit --advisor-effort."
         )
+    if args.designer_api and args.designer_effort is not None:
+        raise ConfigurationError(
+            "--designer-effort is not applicable to --designer-api; the provider owns its reasoning behavior."
+        )
+    if not args.designer_model and args.designer_effort is not None:
+        raise ConfigurationError("--designer-effort requires --designer-model.")
     if args.planner_fable:
         normalize_fable_effort(args.planner_effort)
     if args.advisor_fable or args.advisor_fable_api:
@@ -263,7 +285,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("advisor effort", args.advisor_effort),
         ("designer effort", args.designer_effort),
     ):
-        if value != "auto" and not EFFORT_RE.fullmatch(value):
+        if value is not None and value != "auto" and not EFFORT_RE.fullmatch(value):
             raise ConfigurationError(f"Invalid {label}: {value!r}.")
 
 
@@ -414,7 +436,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.8.0",
+                        "version": "0.9.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -853,6 +875,30 @@ def select_fable_server() -> str:
     )
 
 
+def select_designer_api_server() -> str:
+    for server, (launcher, prefix) in DESIGNER_API_SERVERS.items():
+        executable = shutil.which(launcher)
+        if not executable:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *prefix, "--version"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.search(r"Python\s+(\d+)\.(\d+)", result.stdout)
+        if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (3, 11):
+            return server
+    raise ConfigurationError(
+        "Direct-API Designer requires a Python 3.11+ launcher named python3, python, or py."
+    )
+
+
 def verify_fable_prerequisites(
     effort: str, *, python_api: bool = False, codex_home: Path | None = None
 ) -> dict[str, str]:
@@ -920,6 +966,32 @@ def verify_fable_prerequisites(
     return {"claude": str(claude), **auth}
 
 
+def verify_designer_api_prerequisites(codex_home: Path) -> dict[str, Any]:
+    try:
+        from configure_designer_api import (
+            DesignerApiConfigError,
+            config_sha256,
+            endpoint_sha256,
+            load_config,
+        )
+        config = load_config(codex_home_path=codex_home)
+    except (ImportError, DesignerApiConfigError) as exc:
+        raise ConfigurationError(str(exc)) from exc
+    if not config["enabled"]:
+        raise ConfigurationError(
+            "Direct-API Designer is disabled because the provider api_key is empty."
+        )
+    provider = config["provider"]
+    return {
+        "provider": provider["id"],
+        "model": provider["model"],
+        "wire_api": provider["wire_api"],
+        "endpoint_sha256": endpoint_sha256(config),
+        "config_sha256": config_sha256(config),
+        "api_url": provider["api_url"],
+    }
+
+
 def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
@@ -930,6 +1002,11 @@ def _route_summary(route: dict[str, Any]) -> str:
                 f"(configured effort {route['effort']}; not applied by the API path)"
             )
         return f"Claude Fable 5 {route['effort']}"
+    if route["kind"] == "designer-api":
+        return (
+            f"{route['model']} through {route['provider']} Python API "
+            "(provider reasoning behavior)"
+        )
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1038,15 +1115,25 @@ def build_policy(
         "After any required plan approval, the root may send bounded visual, UX, "
         "interaction, information-architecture, or design-system work to the "
         "configured Designer. The root supplies approved requirements, exact "
-        "deliverables, constraints, and any owned design artifacts. Designer may "
-        "edit only explicitly delegated design artifacts; otherwise it returns a "
-        "design handoff. It does not revise the canonical plan, change implementation "
-        "code, or release Executor. The root validates the handoff and decides what "
-        "Executor receives."
-        if designer is not None
+        "deliverables, constraints, and any owned design artifacts. This API Designer "
+        "returns a stateless design handoff and cannot edit files. It does not revise "
+        "the canonical plan, change implementation code, or release Executor. The root "
+        "validates the handoff and decides what Executor receives."
+        if designer is not None and designer["kind"] == "designer-api"
         else (
-            "No Designer is configured. The root owns design decisions or delegates "
-            "them through ordinary bounded Executor work when useful."
+            "After any required plan approval, the root may send bounded visual, UX, "
+            "interaction, information-architecture, or design-system work to the "
+            "configured Designer. The root supplies approved requirements, exact "
+            "deliverables, constraints, and any owned design artifacts. Designer may "
+            "edit only explicitly delegated design artifacts; otherwise it returns a "
+            "design handoff. It does not revise the canonical plan, change implementation "
+            "code, or release Executor. The root validates the handoff and decides what "
+            "Executor receives."
+            if designer is not None
+            else (
+                "No Designer is configured. The root owns design decisions or delegates "
+                "them through ordinary bounded Executor work when useful."
+            )
         )
     )
     mode = f"""{MANAGED_MARKER}
@@ -1068,7 +1155,7 @@ When executor delegation materially improves speed, cost, quality, or context is
 
 Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
 
-Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Fable MCP requests do not carry caller identity, so caller isolation is instruction-enforced even though the bridge itself disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
+Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. A direct API Designer returns only a stateless handoff; other Designers may edit only explicitly delegated design artifacts. MCP requests do not carry caller identity, so caller isolation is instruction-enforced even though the bridges disable tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools or Designer tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
 """
     if planner is not None and planner["kind"] == "fable":
         planner_hint = (
@@ -1104,7 +1191,14 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
         )
     else:
         advisor_hint = "No advisor route is configured."
-    if designer is not None:
+    if designer is not None and designer["kind"] == "designer-api":
+        designer_hint = (
+            "For a design handoff, call `create_design` from MCP server "
+            f"{json.dumps(designer['server'])} with one bounded packet after any "
+            "required plan approval. This is a root-only read-only tool call. Require "
+            "DESIGN_COMPLETE and validate the returned handoff before Executor work."
+        )
+    elif designer is not None:
         designer_hint = (
             "For delegated design work, call this tool with "
             f"{_spawn_route(designer)}, fork_turns = \"none\". Send approved "
@@ -1187,7 +1281,7 @@ def _current_values(config: dict[str, Any]) -> dict[str, Any]:
                 server,
                 "enabled",
             )
-            for server in FABLE_SERVERS
+            for server in MCP_SERVERS
         },
     }
 
@@ -1318,6 +1412,7 @@ def _status(
         )
         print(f"Config: {app.config_path}")
         fable_available = True
+        designer_available = True
         if state_matches:
             print(f"Executor: {_route_summary(state['executor'])}")
             planner = state.get("planner")
@@ -1352,6 +1447,28 @@ def _status(
                         print(
                             "Claude Fable 5: ready — first-party login; no model call made"
                         )
+            if isinstance(designer, dict) and designer.get("kind") == "designer-api":
+                try:
+                    details = verify_designer_api_prerequisites(app.codex_home)
+                    for key in (
+                        "provider",
+                        "model",
+                        "wire_api",
+                        "endpoint_sha256",
+                        "config_sha256",
+                    ):
+                        if designer.get(key) != details[key]:
+                            raise ConfigurationError(
+                                "Designer API configuration drifted after routing setup."
+                            )
+                except ConfigurationError as exc:
+                    designer_available = False
+                    print(f"Direct-API Designer: unavailable — {exc}")
+                else:
+                    print(
+                        "Direct-API Designer: ready — config file; "
+                        f"provider {details['provider']}; model {details['model']}; no model call made"
+                    )
             try:
                 verified = verify_agent_routes(
                     app.codex_home,
@@ -1413,6 +1530,7 @@ def _status(
             and state_matches
             and agent_routes_available
             and fable_available
+            and designer_available
             and not role_issues
             and not orphaned_roles
         )
@@ -1591,6 +1709,8 @@ def _prepare_setup_state(
             isinstance(route, dict) and route.get("kind") == "fable"
             for route in (planner, advisor)
         )
+        or isinstance(designer, dict)
+        and designer.get("kind") == "designer-api"
         or isinstance(existing_managed, dict)
         and isinstance(existing_managed.get("mcp"), dict)
     )
@@ -1607,7 +1727,11 @@ def _prepare_setup_state(
             ),
             None,
         )
-        selected = fable_route.get("server") if fable_route is not None else None
+        selected_servers = set()
+        if fable_route is not None:
+            selected_servers.add(fable_route["server"])
+        if isinstance(designer, dict) and designer.get("kind") == "designer-api":
+            selected_servers.add(designer["server"])
         existing_mcp = (
             existing_managed.get("mcp")
             if isinstance(existing_managed, dict)
@@ -1618,13 +1742,14 @@ def _prepare_setup_state(
         touched.update(
             server for server, value in current["mcp"].items() if value is not MISSING
         )
-        if isinstance(selected, str):
-            touched.add(selected)
+        touched.update(selected_servers)
         for server in touched:
             if server not in previous_mcp:
                 previous_mcp[server] = snapshot(current["mcp"][server])
         previous["mcp"] = previous_mcp
-        managed_mcp = {server: server == selected for server in FABLE_SERVERS if server in touched}
+        managed_mcp = {
+            server: server in selected_servers for server in MCP_SERVERS if server in touched
+        }
         for server, enabled in managed_mcp.items():
             edits.append(
                 {
@@ -2056,6 +2181,12 @@ def main() -> int:
                 if args.planner_fable or args.advisor_fable or args.advisor_fable_api
                 else None
             )
+            designer_api_server = select_designer_api_server() if args.designer_api else None
+            designer_api_details = (
+                verify_designer_api_prerequisites(app.codex_home)
+                if args.designer_api
+                else None
+            )
             if args.planner_model:
                 planner_effort = resolve_model_effort(
                     "Planner",
@@ -2116,7 +2247,7 @@ def main() -> int:
                 designer_effort = resolve_model_effort(
                     "Designer",
                     args.designer_model,
-                    args.designer_effort,
+                    args.designer_effort or "auto",
                     catalog,
                     args.confirm_unlisted_models,
                 )
@@ -2124,6 +2255,21 @@ def main() -> int:
                     "kind": "model",
                     "model": args.designer_model,
                     "effort": designer_effort,
+                }
+            elif args.designer_api:
+                assert designer_api_details is not None
+                assert designer_api_server is not None
+                designer = {
+                    "kind": "designer-api",
+                    "provider": designer_api_details["provider"],
+                    "model": designer_api_details["model"],
+                    "wire_api": designer_api_details["wire_api"],
+                    "endpoint_sha256": designer_api_details["endpoint_sha256"],
+                    "config_sha256": designer_api_details["config_sha256"],
+                    "server": designer_api_server,
+                    "transport": DESIGNER_API_TRANSPORT,
+                    "api_source": DESIGNER_API_SOURCE,
+                    "path": DESIGNER_API_PATH,
                 }
             validate_planning_routes(planner, advisor)
             for route in (planner, advisor):
@@ -2183,6 +2329,12 @@ def main() -> int:
                         "Claude Fable 5 login: ready — first-party; "
                         "setup makes no model call"
                     )
+            if designer_api_details is not None:
+                print(
+                    "Direct-API Designer: ready — config file; "
+                    f"provider {designer_api_details['provider']}; "
+                    f"model {designer_api_details['model']}; setup makes no model call"
+                )
             if verified_agents:
                 print(
                     "Custom-agent files: "

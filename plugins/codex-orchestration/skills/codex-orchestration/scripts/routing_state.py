@@ -25,11 +25,24 @@ FABLE_SERVERS = frozenset(
 FABLE_API_TRANSPORT = "direct-api"
 FABLE_API_SOURCE = "config-file"
 FABLE_API_PATH = "python-api"
+DESIGNER_API_SERVERS = frozenset(
+    {
+        "designer-api-python3",
+        "designer-api-python",
+        "designer-api-py",
+    }
+)
+DESIGNER_API_TRANSPORT = "direct-api"
+DESIGNER_API_SOURCE = "config-file"
+DESIGNER_API_PATH = "designer-api"
+MCP_SERVERS = FABLE_SERVERS | DESIGNER_API_SERVERS
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BASE_TOP_LEVEL_KEYS = frozenset(
     {
         "schema",
@@ -155,6 +168,51 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
                 route["path"] == FABLE_API_PATH,
                 "Fable Python API path is invalid",
             )
+    elif kind == "designer-api":
+        _require(
+            seat == "designer" and schema >= 5,
+            f"{seat} cannot use Designer API in schema {schema}",
+        )
+        _require(
+            set(route)
+            == {
+                "kind",
+                "provider",
+                "model",
+                "wire_api",
+                "endpoint_sha256",
+                "config_sha256",
+                "server",
+                "transport",
+                "api_source",
+                "path",
+            },
+            "Designer API route has the wrong shape",
+        )
+        _require(
+            type(route["provider"]) is str
+            and _PROVIDER_RE.fullmatch(route["provider"]) is not None,
+            "Designer API provider is invalid",
+        )
+        _require(
+            type(route["model"]) is str and _MODEL_RE.fullmatch(route["model"]) is not None,
+            "Designer API model is invalid",
+        )
+        _require(route["wire_api"] == "anthropic-messages", "Designer API wire protocol is invalid")
+        _require(
+            type(route["endpoint_sha256"]) is str
+            and _SHA256_RE.fullmatch(route["endpoint_sha256"]) is not None,
+            "Designer API endpoint digest is invalid",
+        )
+        _require(
+            type(route["config_sha256"]) is str
+            and _SHA256_RE.fullmatch(route["config_sha256"]) is not None,
+            "Designer API config digest is invalid",
+        )
+        _require(route["server"] in DESIGNER_API_SERVERS, "Designer API server is unsupported")
+        _require(route["transport"] == DESIGNER_API_TRANSPORT, "Designer API transport is invalid")
+        _require(route["api_source"] == DESIGNER_API_SOURCE, "Designer API source is invalid")
+        _require(route["path"] == DESIGNER_API_PATH, "Designer API path is invalid")
     else:
         raise RoutingStateError(f"{seat} route kind is unsupported")
     return kind
@@ -223,7 +281,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1 through 4.
+    """Validate and return one exact, complete persisted schema 1 through 5.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -267,8 +325,8 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     if designer is not None:
         designer_kind = _validate_route(designer, seat="designer", schema=schema)
         _require(
-            designer_kind == "model",
-            "persistent Designer must use a direct model route",
+            designer_kind == "model" or (schema >= 5 and designer_kind == "designer-api"),
+            "persistent Designer must use a direct model or Designer API route",
         )
     _validate_route_separation(planner, advisor)
 
@@ -315,9 +373,10 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         previous_mcp = previous["mcp"]
         _require(type(managed_mcp) is dict and bool(managed_mcp), "MCP state is empty")
         _require(type(previous_mcp) is dict, "MCP restore state must be an object")
+        allowed_servers = MCP_SERVERS if schema >= 5 else FABLE_SERVERS
         _require(
             set(managed_mcp) == set(previous_mcp)
-            and set(managed_mcp).issubset(FABLE_SERVERS),
+            and set(managed_mcp).issubset(allowed_servers),
             "MCP state has unsupported or unpaired servers",
         )
         _require(
@@ -330,14 +389,13 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     else:
         true_servers = []
 
-    if fable_routes:
-        selected_server = fable_routes[0]["server"]
-        _require(
-            true_servers == [selected_server],
-            "MCP state must enable exactly the selected Fable launcher",
-        )
-    else:
-        _require(not true_servers, "MCP state enables a launcher without a Fable seat")
+    selected_servers = {route["server"] for route in fable_routes}
+    if isinstance(designer, dict) and designer.get("kind") == "designer-api":
+        selected_servers.add(designer["server"])
+    _require(
+        set(true_servers) == selected_servers and len(true_servers) == len(selected_servers),
+        "MCP state must enable exactly the selected seat launchers",
+    )
 
     _validate_scalar_conversion(value, managed)
     return value

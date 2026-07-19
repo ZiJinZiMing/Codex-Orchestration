@@ -205,7 +205,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["version"], "0.9.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -228,7 +228,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.8.0"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.9.0"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -261,7 +261,7 @@ class PackagingTests(unittest.TestCase):
         external_reference = SKILL_ROOT / "references/external-models.md"
         self.assertTrue(external_reference.is_file())
 
-    def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
+    def test_direct_api_mcps_are_packaged_and_disabled_until_selected(self) -> None:
         mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
         servers = mcp["mcpServers"]
         self.assertEqual(
@@ -270,14 +270,24 @@ class PackagingTests(unittest.TestCase):
                 "fable-advisor-python3",
                 "fable-advisor-python",
                 "fable-advisor-py",
+                "designer-api-python3",
+                "designer-api-python",
+                "designer-api-py",
             },
         )
-        for server in servers.values():
+        for name, server in servers.items():
             self.assertFalse(server["enabled"])
             self.assertEqual(server["cwd"], ".")
-            self.assertIn("fable_advisor_mcp.py", server["args"][-1])
+            expected_script = (
+                "designer_api_mcp.py"
+                if name.startswith("designer-api-")
+                else "fable_advisor_mcp.py"
+            )
+            self.assertIn(expected_script, server["args"][-1])
         self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
         self.assertTrue((SKILL_ROOT / "scripts" / "configure_fable_api.py").is_file())
+        self.assertTrue((SKILL_ROOT / "scripts" / "designer_api_mcp.py").is_file())
+        self.assertTrue((SKILL_ROOT / "scripts" / "configure_designer_api.py").is_file())
 
     def test_explicit_and_natural_language_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -334,13 +344,15 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.8.0"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.9.0"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
         self.assertIn("configure_native_routing.py", smoke_text)
         self.assertIn("configure_orchestration.py", smoke_text)
         self.assertIn("fable_advisor_mcp.py", smoke_text)
+        self.assertIn("designer_api_mcp.py", smoke_text)
+        self.assertIn('{"create_design", "status"}', smoke_text)
         self.assertIn('"method": "initialize"', smoke_text)
         self.assertIn('"method": "tools/list"', smoke_text)
         self.assertIn('"marketplace",\n                    "upgrade"', smoke_text)

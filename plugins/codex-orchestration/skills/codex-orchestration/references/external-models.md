@@ -19,6 +19,14 @@ An arbitrary URL, model ID, effort, shell command, project-local helper, or gene
 subscription CLI is not a provider. Additions require code review, exact schemas,
 negative tests, and a new plugin release.
 
+The separately selected Python API Designer is not an External Models lifecycle
+provider and does not modify this audited manifest lane. It uses its own strict
+local config, exact Anthropic Messages endpoint/model mapping, and root-directed
+stateless bridge. For Kimi Coding Plan that direct route sends API model `k3`, not
+the Claude Code alias `k3[1M]`. `Designer: Kimi K3` still means the audited
+OpenRouter lifecycle below; only `Designer: Kimi K3 Python API` selects the
+independent direct API transport.
+
 ## Lifecycle
 
 The native lifecycle is:

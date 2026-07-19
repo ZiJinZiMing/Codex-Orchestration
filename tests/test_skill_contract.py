@@ -92,8 +92,16 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("omitted designer means `designer: none`", SKILL)
         self.assertIn("--designer-model", SKILL)
         self.assertIn("--designer-effort", SKILL)
+        self.assertIn("--designer-api", SKILL)
         self.assertNotIn("--designer-agent", SKILL)
-        self.assertIn("Persistent Designer accepts only a direct same-provider model", SKILL)
+        self.assertIn(
+            "Persistent Designer accepts either that exact config-file API route",
+            SKILL,
+        )
+        self.assertIn("designer: Kimi K3 Python API", SKILL)
+        self.assertIn(".codex-orchestration-designer-api.json", SKILL)
+        self.assertIn("`create_design`", SKILL)
+        self.assertIn("`DESIGN_COMPLETE`", SKILL)
         self.assertIn("task-local External Model role named `designer`", SKILL)
         self.assertIn("Designer may edit only explicitly delegated design artifacts", SKILL)
         self.assertIn("never revises the canonical plan", SKILL)

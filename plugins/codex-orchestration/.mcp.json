@@ -24,6 +24,31 @@
       ],
       "cwd": ".",
       "enabled": false
+    },
+    "designer-api-python3": {
+      "command": "python3",
+      "args": [
+        "skills/codex-orchestration/scripts/designer_api_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "designer-api-python": {
+      "command": "python",
+      "args": [
+        "skills/codex-orchestration/scripts/designer_api_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "designer-api-py": {
+      "command": "py",
+      "args": [
+        "-3.11",
+        "skills/codex-orchestration/scripts/designer_api_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
     }
   }
 }

@@ -1,6 +1,26 @@
 # Changelog
 
-## 0.8.0 — Unreleased
+## 0.9.0 — Unreleased
+
+- Add an explicit, config-file-only Python API transport for Designer. The
+  root-directed bridge sends one Anthropic Messages request to the exact configured
+  endpoint and model, requires `end_turn` plus a `DESIGN_COMPLETE` handoff with a
+  non-empty body, and never redirects, retries, falls back, invokes tools, or
+  persists a provider session.
+- Add a dedicated `.codex-orchestration-designer-api.json` configurator for the
+  Designer role, provider ID, endpoint, exact API model ID, bearer or `x-api-key`
+  authentication, wire protocol, and response-token bound. Secrets are accepted
+  only through a hidden prompt or standard input and are excluded from routing
+  fingerprints and status output.
+- Advance native routing state to schema/policy version 5. Schemas 1–4 remain
+  read-only compatible and migrate only on explicit setup; Fable Advisor and API
+  Designer launchers can coexist, while an older plugin fails closed on schema 5.
+  Disable with version 0.9 before downgrading.
+- Keep the audited OpenRouter/Kimi External Model lifecycle and the Fable Python API
+  Advisor unchanged. Kimi's Claude Code alias `k3[1M]` is not accepted as an API
+  model mapping; direct API configuration uses the provider's exact `k3` model ID.
+
+## 0.8.0 — 2026-07-19
 
 - Add an explicit, config-file-only Python API transport for the Claude Fable 5
   Advisor. The route remains root-directed through the existing read-only MCP

@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.8.0"
+NEW_VERSION = "0.9.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -81,7 +81,14 @@ def run_json(
         ) from exc
 
 
-def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> None:
+def probe_mcp_subprocess(
+    script: Path,
+    *,
+    expected_name: str,
+    expected_tools: set[str],
+    cwd: Path,
+    env: dict[str, str],
+) -> None:
     requests = "\n".join(
         json.dumps(request)
         for request in (
@@ -110,23 +117,23 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
             timeout=COMMAND_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SmokeFailure(f"Installed Fable MCP subprocess failed: {exc}") from exc
+        raise SmokeFailure(f"Installed MCP subprocess failed: {exc}") from exc
     if completed.returncode != 0:
         raise SmokeFailure(
-            "Installed Fable MCP subprocess did not shut down cleanly: "
+            "Installed MCP subprocess did not shut down cleanly: "
             f"exit {completed.returncode}; {completed.stderr.strip()}"
         )
     try:
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
     except json.JSONDecodeError as exc:
-        raise SmokeFailure("Installed Fable MCP returned malformed JSON-RPC") from exc
+        raise SmokeFailure("Installed MCP returned malformed JSON-RPC") from exc
     if len(responses) != 2 or [response.get("id") for response in responses] != [1, 2]:
-        raise SmokeFailure(f"Installed Fable MCP returned unexpected responses: {responses!r}")
+        raise SmokeFailure(f"Installed MCP returned unexpected responses: {responses!r}")
     server_info = responses[0].get("result", {}).get("serverInfo", {})
     assert_equal(
         server_info.get("name"),
-        "codex-orchestration-fable-advisor",
-        "installed Fable MCP server identity",
+        expected_name,
+        "installed MCP server identity",
     )
     tools = responses[1].get("result", {}).get("tools", [])
     tool_names = {
@@ -134,8 +141,8 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
     }
     assert_equal(
         tool_names,
-        {"create_plan", "revise_plan", "review_plan", "status"},
-        "installed Fable MCP tool list",
+        expected_tools,
+        "installed MCP tool list",
     )
 
 
@@ -531,6 +538,8 @@ def main() -> int:
                 "never reinterpret a supplied `planner:` model as an Advisor",
                 "Fable Planner uses `create_plan` and `revise_plan`",
                 "Designer may edit only explicitly delegated design artifacts",
+                "designer: Kimi K3 Python API",
+                "only root calls `create_design`",
                 "is Kimi available to use as Designer?",
                 "Implicit invocation is discovery, not mutation authority",
                 "/codex-orchestration repair",
@@ -560,7 +569,27 @@ def main() -> int:
                 / "scripts"
                 / "fable_advisor_mcp.py"
             )
-            probe_mcp_subprocess(installed_fable_mcp, cwd=project, env=env)
+            probe_mcp_subprocess(
+                installed_fable_mcp,
+                expected_name="codex-orchestration-fable-advisor",
+                expected_tools={"create_plan", "revise_plan", "review_plan", "status"},
+                cwd=project,
+                env=env,
+            )
+            installed_designer_mcp = (
+                installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "scripts"
+                / "designer_api_mcp.py"
+            )
+            probe_mcp_subprocess(
+                installed_designer_mcp,
+                expected_name="codex-orchestration-designer-api",
+                expected_tools={"create_design", "status"},
+                cwd=project,
+                env=env,
+            )
 
             native_configurator = (
                 installed_root

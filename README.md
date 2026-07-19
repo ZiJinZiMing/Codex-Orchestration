@@ -124,6 +124,38 @@ configured model echo and an `end_turn` result, and exposes only
 Claude-settings, or subscription fallback. The configured effort is retained as
 workflow metadata but is not sent by this API path.
 
+### Optional Python API Designer
+
+Designer may independently use a direct Python API route without Claude Code,
+OpenRouter role creation, or the Fable bridge. Configure its dedicated file first:
+
+```bash
+python3 <skill-dir>/scripts/configure_designer_api.py --codex-home ~/.codex
+```
+
+The configurator stores the Designer role, provider ID, full Anthropic Messages
+endpoint, exact API model ID, bearer or `x-api-key` authentication, protocol, and
+response-token bound in `.codex-orchestration-designer-api.json`. The API key is
+read only from a hidden prompt or `--api-key-stdin`; it is plaintext in that local
+file, so protect it with the user account ACL and never commit, log, or share it.
+For Kimi Coding Plan the defaults are `https://api.kimi.com/coding/v1/messages`
+and API model `k3`. The Claude Code alias `k3[1M]` is not an API model ID.
+
+Then select the route explicitly:
+
+```text
+/codex-orchestration setup designer: Kimi K3 Python API, executor: GPT-5.6 Luna Extra High
+```
+
+The native flag is `--designer-api`; it is mutually exclusive with
+`--designer-model`, and `--designer-effort` is not accepted for the API route.
+Setup and status validate non-secret config identity without a model call. Each
+design request performs one non-redirecting, non-retrying Messages call, requires
+the exact configured model echo, `end_turn`, and a non-empty `DESIGN_COMPLETE`
+handoff. It never falls back to OpenRouter, Claude Code, CC Switch, environment
+credentials, or another model. The Fable Advisor API route may be enabled at the
+same time because the two roles use separate configs and MCP launchers.
+
 ## Choose your roles
 
 ```text
@@ -302,13 +334,17 @@ Version **0.6.0 or newer** is required for External Model roles; version **0.7.0
 or newer** adds `--update`, routing repair, and Designer; version **0.7.1 or newer**
 lets the natural `Designer: Kimi K3` label enter the External Model lifecycle;
 version **0.7.2 or newer** uses the concise per-role activation confirmation;
-version **0.8.0 or newer** adds the config-file-only Python API Fable Advisor.
+version **0.8.0 or newer** adds the config-file-only Python API Fable Advisor;
+version **0.9.0 or newer** adds the independently configured Python API Designer.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 
 If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
 
-Before downgrading to a version older than the currently saved routing schema, run `/codex-orchestration disable` with the current version first.
+Before downgrading to a version older than the currently saved routing schema, run
+`/codex-orchestration disable` with the current version first. In particular, disable
+schema 5 with version 0.9 before returning to 0.8; if 0.8 is already installed and
+fails closed on schema 5, reinstall 0.9, disable, and only then downgrade.
 
 ## Uninstall
 
