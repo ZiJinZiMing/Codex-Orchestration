@@ -18,7 +18,11 @@ import shutil
 import subprocess
 import sys
 from typing import Any, Literal
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
+from configure_fable_api import FableApiConfigError, load_config as load_fable_api_config
 import routing_state
 
 
@@ -34,6 +38,11 @@ FABLE_HELPER_MODEL = "claude-haiku-4-5-20251001"
 ALLOWED_RUNTIME_MODELS = frozenset({FABLE_MODEL, FABLE_HELPER_MODEL})
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
+DIRECT_API_TIMEOUT_SECONDS = 600
+DIRECT_API_MAX_TOKENS = 65536
+DIRECT_API_MAX_RESPONSE_BYTES = 2_000_000
+ANTHROPIC_VERSION = "2023-06-01"
+LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # Applies to the combined user-controlled text sent by one model operation.
 MAX_INPUT_CHARS = 200_000
 SENSITIVE_ENV = {
@@ -84,6 +93,61 @@ class AdvisorError(RuntimeError):
     """Fail-closed error for any Fable bridge operation."""
 
 
+def _safe_refusal_field(value: Any, max_chars: int = 512) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split())
+    return cleaned[:max_chars] if cleaned else None
+
+
+def _safe_http_error_type(value: Any) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 96:
+        return None
+    if not all(char.isascii() and (char.isalnum() or char in "._-") for char in value):
+        return None
+    return value
+
+
+def _safe_http_error_diagnostics(exc: urllib_error.HTTPError) -> str:
+    """Expose only bounded provider type and retry timing, never response text."""
+
+    details: list[str] = []
+    retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+    if (
+        isinstance(retry_after, str)
+        and retry_after.strip().isdigit()
+        and len(retry_after.strip()) <= 10
+    ):
+        details.append(f"retry_after_seconds={retry_after.strip()}")
+    try:
+        payload = json.loads(exc.read(4096).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        error_type = _safe_http_error_type(
+            error.get("type") if isinstance(error, dict) else None
+        )
+        if error_type is not None:
+            details.append(f"provider_error_type={error_type}")
+    return "; " + "; ".join(details) if details else ""
+
+
+class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    """Prevent forwarding the configured API credential across redirects."""
+
+    def redirect_request(
+        self,
+        req: urllib_request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 def codex_home() -> Path:
     value = os.environ.get("CODEX_HOME")
     return Path(value).expanduser() if value else Path.home() / ".codex"
@@ -94,6 +158,38 @@ def sanitized_environment() -> dict[str, str]:
     for name in SENSITIVE_ENV:
         env.pop(name, None)
     return env
+
+
+def _python_api_configuration(home: Path | None = None) -> tuple[dict[str, str], str, str]:
+    try:
+        config = load_fable_api_config(codex_home=home or codex_home())
+    except FableApiConfigError as exc:
+        raise AdvisorError(str(exc)) from exc
+    if not config["enabled"]:
+        raise AdvisorError(
+            "Python API Advisor is disabled because the provider api_key is empty."
+        )
+    provider = config["provider"]
+    credential = (
+        {"Authorization": f"Bearer {provider['api_key']}"}
+        if provider["auth_type"] == "bearer"
+        else {"x-api-key": provider["api_key"]}
+    )
+    return credential, provider["api_url"], provider["model"]
+
+
+def check_python_api_config(home: Path | None = None) -> dict[str, str]:
+    """Validate the configured Python API Advisor without exposing its secret."""
+
+    _, endpoint, request_model = _python_api_configuration(home)
+    return {
+        "auth_method": "config-file",
+        "api_source": routing_state.FABLE_API_SOURCE,
+        "transport": routing_state.FABLE_API_TRANSPORT,
+        "advisor_path": routing_state.FABLE_API_PATH,
+        "api_url": endpoint,
+        "request_model": request_model,
+    }
 
 
 def resolve_claude() -> Path:
@@ -196,7 +292,21 @@ def _validate_seat(seat: str) -> Seat:
 def _validate_fable_route(route: Any, *, seat: Seat) -> dict[str, str]:
     if not isinstance(route, dict) or route.get("kind") != "fable":
         raise AdvisorError(f"Claude Fable 5 is not the configured {seat}.")
-    return {"model": route["model"], "effort": route["effort"]}
+    result = {"model": route["model"], "effort": route["effort"]}
+    if seat == "advisor" and route.get("transport") == routing_state.FABLE_API_TRANSPORT:
+        if (
+            route.get("api_source") != routing_state.FABLE_API_SOURCE
+            or route.get("path") != routing_state.FABLE_API_PATH
+        ):
+            raise AdvisorError("The saved Python API Advisor route is invalid.")
+        result.update(
+            {
+                "transport": routing_state.FABLE_API_TRANSPORT,
+                "api_source": routing_state.FABLE_API_SOURCE,
+                "path": routing_state.FABLE_API_PATH,
+            }
+        )
+    return result
 
 
 def load_fable_route(
@@ -410,8 +520,113 @@ def revise_plan(
     }
 
 
+def _review_plan_python_api(packet: str, route: dict[str, str]) -> dict[str, Any]:
+    credential_header, endpoint, request_model = _python_api_configuration()
+    body = {
+        "model": request_model,
+        "max_tokens": DIRECT_API_MAX_TOKENS,
+        "system": ADVISOR_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": packet}],
+    }
+    request = urllib_request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "content-type": "application/json",
+            "anthropic-version": ANTHROPIC_VERSION,
+            **credential_header,
+        },
+        method="POST",
+    )
+    handlers: list[Any] = [NoRedirectHandler()]
+    if urllib_parse.urlsplit(endpoint).hostname in LOCAL_HTTP_HOSTS:
+        handlers.insert(0, urllib_request.ProxyHandler({}))
+    opener = urllib_request.build_opener(*handlers)
+    try:
+        with opener.open(request, timeout=DIRECT_API_TIMEOUT_SECONDS) as response:
+            status = response.getcode()
+            if not isinstance(status, int) or not 200 <= status < 300:
+                raise AdvisorError("Python API returned an unsuccessful HTTP status.")
+            raw = response.read(DIRECT_API_MAX_RESPONSE_BYTES + 1)
+            if len(raw) > DIRECT_API_MAX_RESPONSE_BYTES:
+                raise AdvisorError("Python API response exceeded the bounded size limit.")
+    except urllib_error.HTTPError as exc:
+        status = exc.code if isinstance(exc.code, int) else "unknown"
+        diagnostics = _safe_http_error_diagnostics(exc)
+        exc.close()
+        raise AdvisorError(
+            f"Python API request failed with HTTP status {status}.{diagnostics}"
+        ) from None
+    except (TimeoutError, urllib_error.URLError, OSError):
+        raise AdvisorError(
+            "Python API request failed due to a network or timeout error."
+        ) from None
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise AdvisorError("Python API returned malformed JSON.") from None
+    if not isinstance(payload, dict):
+        raise AdvisorError("Python API returned an unexpected JSON value.")
+    response_model = payload.get("model")
+    if response_model != request_model:
+        raise AdvisorError(
+            "Strict model verification failed: Python API requested model "
+            f"{request_model!r} but the provider echoed {response_model!r}."
+        )
+    stop_reason = payload.get("stop_reason")
+    if stop_reason != "end_turn":
+        if stop_reason == "refusal":
+            details = payload.get("stop_details")
+            details = details if isinstance(details, dict) else {}
+            raise AdvisorError(
+                "Python API response was refused; "
+                f"refusal_type={_safe_refusal_field(details.get('type'))!r}; "
+                f"category={_safe_refusal_field(details.get('category'))!r}. "
+                "Advisor unavailable; executor work must remain blocked."
+            )
+        raise AdvisorError(
+            "Python API response did not complete with end_turn; "
+            f"stop_reason={stop_reason!r}."
+        )
+    content = payload.get("content")
+    if not isinstance(content, list):
+        raise AdvisorError("Python API returned an unexpected response.")
+    text_blocks = [
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        and block["text"].strip()
+    ]
+    if not text_blocks:
+        raise AdvisorError("Python API returned no review text.")
+    review = "\n".join(text_blocks).strip()
+    decision = _first_non_empty_line(review)
+    if decision not in {"PLAN_APPROVED", "PLAN_REVISE"}:
+        raise AdvisorError("Claude Fable 5 omitted the required plan decision.")
+    return {
+        "decision": decision,
+        "review": review,
+        "model": FABLE_MODEL,
+        "request_model": request_model,
+        "response_model": response_model,
+        "effort": "not-applied",
+        "configured_effort": route["effort"],
+        "auth_method": "config-file",
+        "api_source": routing_state.FABLE_API_SOURCE,
+        "transport": routing_state.FABLE_API_TRANSPORT,
+        "advisor_path": routing_state.FABLE_API_PATH,
+        "used_models": [FABLE_MODEL],
+    }
+
+
 def review_plan(packet: str) -> dict[str, Any]:
     values = _validate_inputs("plan review", packet=packet)
+    route = load_fable_route(seat="advisor")
+    if route.get("transport") == routing_state.FABLE_API_TRANSPORT:
+        return _review_plan_python_api(values["packet"], route)
     signal, response, route, auth, used_models = _invoke_fable(
         operation="plan review",
         seat="advisor",
@@ -445,7 +660,15 @@ def _configured_fable_seats() -> dict[str, dict[str, str]]:
 
 def status() -> dict[str, Any]:
     routes = _configured_fable_seats()
-    auth = check_claude_auth()
+    advisor = routes.get("advisor")
+    if advisor is not None and advisor.get("transport") == routing_state.FABLE_API_TRANSPORT:
+        api_status = check_python_api_config()
+        auth: dict[str, Any] = {
+            **api_status,
+            "model_call": False,
+        }
+    else:
+        auth = check_claude_auth()
     seats = {
         seat: {"model": route["model"], "effort": route["effort"]}
         for seat, route in routes.items()
@@ -459,6 +682,9 @@ def status() -> dict[str, Any]:
     # Preserve the unambiguous legacy Advisor status fields.
     if "advisor" in seats:
         result.update(seats["advisor"])
+        if advisor is not None and advisor.get("transport") == routing_state.FABLE_API_TRANSPORT:
+            result["effort"] = "not-applied"
+            result["configured_effort"] = advisor["effort"]
     return result
 
 

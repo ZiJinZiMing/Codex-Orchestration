@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.0 — Unreleased
+
+- Add an explicit, config-file-only Python API transport for the Claude Fable 5
+  Advisor. The route remains root-directed through the existing read-only MCP
+  bridge, sends one Anthropic Messages request with no tools or persistence, and
+  requires the provider to echo the exact configured model and return a bounded
+  `PLAN_APPROVED` or `PLAN_REVISE` response.
+- Add a secret-safe configurator for the dedicated
+  `.codex-orchestration-fable-api.json` file. The endpoint, provider model mapping,
+  and bearer or `x-api-key` authentication are configurable; secrets are accepted
+  only from a hidden prompt or standard input and never from command arguments.
+- Keep the existing Claude Code subscription Planner/Advisor route unchanged.
+  Python API is Advisor-only, has no CC Switch or environment fallback, and does
+  not extend the Designer or Executor seats.
+
 ## 0.7.2 — Unreleased
 
 - Enable implicit skill discovery for natural-language Kimi K3, External Model,

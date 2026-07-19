@@ -87,6 +87,21 @@ Code helpers. The managed workflow authorizes only root to call planning tools, 
 MCP does not provide caller identity; that caller boundary remains
 instruction-enforced rather than server-authenticated.
 
+The optional Python API Fable Advisor is a separate, explicit transport with a
+dedicated local secret file. Its endpoint and provider model mapping are
+operator-controlled, so the provider and configured HTTPS endpoint are trusted
+dependencies; exact response-model echo verifies only that the provider honored
+the configured mapping, not its hidden implementation. The configurator rejects
+non-Messages URLs, permits cleartext HTTP only for exact loopback hosts, refuses
+symlinked/non-regular/multiply-linked files, writes atomically, and never accepts a
+secret in argv. Runtime performs one request with no retry, disables proxies for
+loopback, refuses redirects to prevent credential forwarding, and emits only
+bounded non-secret error diagnostics. Missing, blank, malformed, unsafe, or
+mismatched configuration fails closed without consulting environment variables,
+Claude settings, CC Switch, or the subscription adapter. The JSON config contains
+the API key in plaintext and must remain protected by the user's account ACL and
+must never be committed, logged, or shared.
+
 Routing schema/policy version 4 adds the optional Designer field while retaining
 strict validation for schemas 1–3. Legacy schemas cannot smuggle a Designer key,
 and persistent Designer accepts only a direct same-provider model, never the

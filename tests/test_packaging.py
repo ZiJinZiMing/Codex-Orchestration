@@ -205,7 +205,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.7.2")
+        self.assertEqual(manifest["version"], "0.8.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -228,7 +228,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.7.2"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.8.0"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -277,6 +277,7 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(server["cwd"], ".")
             self.assertIn("fable_advisor_mcp.py", server["args"][-1])
         self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
+        self.assertTrue((SKILL_ROOT / "scripts" / "configure_fable_api.py").is_file())
 
     def test_explicit_and_natural_language_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -299,6 +300,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/codex-orchestration disable", readme)
         self.assertIn("/codex-orchestration --update", readme)
         self.assertIn("designer: GPT-5.6", readme)
+        self.assertIn("advisor: Claude Fable 5 Python API", readme)
         self.assertIn("codex plugin add codex-orchestration@codex-orchestration", readme)
 
     def test_starter_prompts_fit_codex_limits(self) -> None:
@@ -332,7 +334,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.7.2"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.8.0"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)

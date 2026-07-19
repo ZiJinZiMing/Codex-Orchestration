@@ -335,6 +335,22 @@ class NativeRoutingTests(unittest.TestCase):
             (self.home / ".fake-user-config.json").read_text(encoding="utf-8")
         )
 
+    def write_fable_api_config(self, api_key: str = "test-secret") -> None:
+        (self.home / ".codex-orchestration-fable-api.json").write_text(
+            json.dumps(
+                {
+                    "schema": 2,
+                    "provider": {
+                        "api_url": "https://openrouter.ai/api/v1/messages",
+                        "api_key": api_key,
+                        "model": "anthropic/claude-fable-5",
+                        "auth_type": "bearer",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def write_personal_agent(self, name: str, *, managed: bool = False) -> Path:
         agents = self.home / "agents"
         agents.mkdir(exist_ok=True)
@@ -403,6 +419,72 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("If you are a spawned child, do not call this tool", usage)
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
+
+    def test_python_api_advisor_flag_is_explicit_and_subscription_is_unchanged(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                str(SCRIPT),
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--advisor-fable-api",
+                "--advisor-effort",
+                "xhigh",
+            ],
+        ):
+            args = NATIVE.parse_args()
+        NATIVE._validate_args(args)
+        self.assertTrue(args.advisor_fable_api)
+        self.assertFalse(args.advisor_fable)
+        direct_route = {
+            "kind": "fable",
+            "model": NATIVE.FABLE_MODEL,
+            "effort": NATIVE.normalize_fable_effort(args.advisor_effort),
+            "server": "fable-advisor-python3",
+            "transport": NATIVE.FABLE_API_TRANSPORT,
+            "api_source": NATIVE.FABLE_API_SOURCE,
+            "path": NATIVE.FABLE_API_PATH,
+        }
+        self.assertIn("not applied", NATIVE._route_summary(direct_route))
+        subscription_route = {
+            key: direct_route[key]
+            for key in ("kind", "model", "effort", "server")
+        }
+        self.assertEqual(
+            NATIVE._route_summary(subscription_route), "Claude Fable 5 xhigh"
+        )
+
+    @unittest.skipIf(os.name == "nt", "the fake Codex executable uses a POSIX shebang")
+    def test_python_api_advisor_setup_persists_exact_route_and_status(self) -> None:
+        self.write_fable_api_config()
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable-api",
+            "--advisor-effort",
+            "xhigh",
+            "--apply",
+        )
+        self.assertIn("Claude Fable 5 Python API: ready", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            state["advisor"],
+            {
+                "kind": "fable",
+                "model": "claude-fable-5",
+                "effort": "xhigh",
+                "server": "fable-advisor-python3",
+                "transport": "direct-api",
+                "api_source": "config-file",
+                "path": "python-api",
+            },
+        )
+        status = self.run_script("--status")
+        self.assertIn("Claude Fable 5 Python API: ready", status.stdout)
+        self.assertNotIn("test-secret", status.stdout)
 
     def test_policy_root_fallback_planner_without_advisor_and_fable_hints(self) -> None:
         executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}

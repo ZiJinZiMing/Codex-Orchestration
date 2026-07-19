@@ -27,6 +27,7 @@ These facts were source-checked and runtime-tested on July 10, 2026. Always capa
 | `usage_hint_text` | Appended to the spawn tool description | Carries the exact Planner/Advisor/Executor routes where the root chooses children. |
 | `multi_agent_mode_hint_text` | Replaces the default proactive/explicit mode hint and is sent to root and child tasks | Must contain both root and child boundaries. |
 | Claude Fable 5 MCP route | Root-directed `create_plan`, `revise_plan`, and `review_plan` tools invoke the authenticated Claude Code CLI headlessly with no model tools | Built-in cross-provider Planner or Advisor exception; current MCP requests do not provide caller identity, so caller isolation is policy-enforced. |
+| Claude Fable 5 Python API Advisor | Root-directed `review_plan` reads one dedicated config file and sends one Anthropic Messages request to the exact configured URL/model mapping | Advisor-only explicit transport; no CC Switch, environment, Claude-settings, subscription fallback, redirects, retries, tools, or persistence. |
 | `fork_turns` default | `all` | Different model/effort/role overrides are rejected unless the call uses `none` or a positive partial fork. |
 | Effective concurrency | Determined by the active Codex version and `agents.max_threads` configuration | This plugin never changes the limit or forces a worker count. |
 | Older CLI 0.142.5 | Rejects `multi_agent_mode_hint_text` as an unknown feature-table field | Never write the global native policy without checking every known shared-config client. |
@@ -229,6 +230,17 @@ Direct v2 `model` overrides retain the parent's provider. They are the simplest 
 
 Claude Fable 5 is the explicit built-in exception for Planner or Advisor. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
 
+Advisor also has an explicit config-file-only Python API transport. Run
+`configure_fable_api.py` to create
+`~/.codex/.codex-orchestration-fable-api.json`, then select
+`--advisor-fable-api`. The file stores the full Anthropic Messages endpoint, the
+provider's exact model ID, authentication type, and API key. It is a local secret
+file and must never be committed or pasted into chat. Setup and status disclose
+only its path, endpoint, model mapping, and readiness; they make no model call.
+At review time the bridge makes one non-redirecting, non-retrying request and
+requires exact model echo, `end_turn`, and a bounded plan decision. No other
+credential source or transport is consulted after this route is saved.
+
 The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vertex/Foundry selection variables from the child environment. It re-checks `claude auth status`, pins `claude-fable-5` and the saved effort, disables tools and session persistence, disables prompt suggestions, and requires JSON runtime metadata to contain that primary model. Claude Code currently reports the internal helper `claude-haiku-4-5-20251001` during valid Fable calls; the bridge permits only that exact helper ID and returns every observed ID in `used_models`. Missing Fable or any unknown additional model fails closed. Helper rotation therefore requires a reviewed plugin update rather than a wildcard. Setup and status never make a model call.
 
 An MCP process is loaded for the lifetime of its Codex task. Updating the plugin or
@@ -240,7 +252,7 @@ itself reports authentication unavailable.
 
 The saved policy authorizes the root to call these planning tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. The bridge mechanically uses the same full saved-state validator as native status/repair/disable, restricts the operation surface, and runs Fable without tools or persistence.
 
-Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner; schema 4 must carry policy version 4 and adds the optional direct-model Designer route. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, seat change, disable, or Fable trusts them. Designer cannot use Fable or a persistent unqualified agent name, while Planner/Advisor independence remains the only route-separation rule. Unknown extensions intentionally fail closed.
+Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner; schema 4 must carry policy version 4 and adds the optional direct-model Designer route plus the exact config-file Python API metadata on a Fable Advisor only. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, seat change, disable, or Fable trusts them. Designer cannot use Fable or a persistent unqualified agent name, while Planner/Advisor independence remains the only route-separation rule. Unknown extensions intentionally fail closed.
 
 Fable setup defaults to `high`. It accepts the Claude Code effort values `low`, `medium`, `high`, `xhigh`, and `max`; the user-facing label `ultra` normalizes to the effective Claude Code value `max` because the CLI has no separate Ultra setting. Setup checks the installed CLI's advertised choices before persisting the route. The bridge reads only the normalized saved value, so tool callers cannot raise the effort at review time. Existing saved `max` routes remain compatible.
 

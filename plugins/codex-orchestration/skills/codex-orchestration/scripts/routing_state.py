@@ -22,6 +22,9 @@ FABLE_SERVERS = frozenset(
         "fable-advisor-py",
     }
 )
+FABLE_API_TRANSPORT = "direct-api"
+FABLE_API_SOURCE = "config-file"
+FABLE_API_PATH = "python-api"
 
 _SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
@@ -122,8 +125,12 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             seat in {"planner", "advisor"} and schema >= 2,
             f"{seat} cannot use Fable in schema {schema}",
         )
+        base_keys = {"kind", "model", "effort", "server"}
+        route_keys = set(route)
+        direct_api_route = seat == "advisor" and schema >= 4 and route_keys != base_keys
+        expected_keys = base_keys | {"transport", "api_source", "path"}
         _require(
-            set(route) == {"kind", "model", "effort", "server"},
+            route_keys == (expected_keys if direct_api_route else base_keys),
             f"{seat} Fable route has the wrong shape",
         )
         _require(route["model"] == FABLE_MODEL, "Fable model is not pinned")
@@ -135,6 +142,19 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             type(route["server"]) is str and route["server"] in FABLE_SERVERS,
             "Fable server is unsupported",
         )
+        if direct_api_route:
+            _require(
+                route["transport"] == FABLE_API_TRANSPORT,
+                "Fable Python API transport is invalid",
+            )
+            _require(
+                route["api_source"] == FABLE_API_SOURCE,
+                "Fable Python API source is invalid",
+            )
+            _require(
+                route["path"] == FABLE_API_PATH,
+                "Fable Python API path is invalid",
+            )
     else:
         raise RoutingStateError(f"{seat} route kind is unsupported")
     return kind

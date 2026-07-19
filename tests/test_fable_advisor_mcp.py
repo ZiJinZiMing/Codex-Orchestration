@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,37 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "effort": effort,
             "server": "fable-advisor-python3",
         }
+
+    @staticmethod
+    def api_route(effort: str = "high") -> dict[str, str]:
+        return {
+            **FableAdvisorMcpTests.route(effort),
+            "transport": "direct-api",
+            "api_source": "config-file",
+            "path": "python-api",
+        }
+
+    def write_api_config(
+        self,
+        *,
+        api_key: str = "test-secret",
+        model: str = "anthropic/claude-fable-5",
+        api_url: str = "https://openrouter.ai/api/v1/messages",
+    ) -> None:
+        (self.home / ".codex-orchestration-fable-api.json").write_text(
+            json.dumps(
+                {
+                    "schema": 2,
+                    "provider": {
+                        "api_url": api_url,
+                        "api_key": api_key,
+                        "model": model,
+                        "auth_type": "bearer",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def write_state(self, *, schema: int = 3, **seats: object) -> None:
         fable_routes = [
@@ -696,6 +728,225 @@ class FableAdvisorMcpTests(unittest.TestCase):
             with self.subTest(effort=effort):
                 self.write_state(advisor=self.route(effort))
                 self.assertEqual(FABLE.load_fable_route(self.home)["effort"], effort)
+
+    def test_python_api_advisor_uses_one_strict_request_without_claude(self) -> None:
+        self.write_state(schema=4, advisor=self.api_route("xhigh"))
+        self.write_api_config()
+        captured: dict[str, object] = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def getcode() -> int:
+                return 200
+
+            @staticmethod
+            def read(_size: int = -1) -> bytes:
+                return json.dumps(
+                    {
+                        "model": "anthropic/claude-fable-5",
+                        "stop_reason": "end_turn",
+                        "content": [
+                            {"type": "text", "text": "PLAN_APPROVED\nReady."}
+                        ],
+                    }
+                ).encode("utf-8")
+
+        class Opener:
+            @staticmethod
+            def open(request: object, *, timeout: int) -> Response:
+                captured["request"] = request
+                captured["timeout"] = timeout
+                return Response()
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_HOME": str(self.home),
+                    "ANTHROPIC_API_KEY": "poisoned-environment-key",
+                },
+            ),
+            mock.patch.object(FABLE.urllib_request, "build_opener", return_value=Opener()),
+            mock.patch.object(FABLE.subprocess, "run") as run,
+        ):
+            result = FABLE.review_plan("Review this plan.")
+
+        run.assert_not_called()
+        self.assertEqual(result["decision"], "PLAN_APPROVED")
+        self.assertEqual(result["model"], "claude-fable-5")
+        self.assertEqual(result["request_model"], "anthropic/claude-fable-5")
+        self.assertEqual(result["effort"], "not-applied")
+        self.assertEqual(result["configured_effort"], "xhigh")
+        request = captured["request"]
+        self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/messages")
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-secret")
+        body = json.loads(request.data)
+        self.assertEqual(body["model"], "anthropic/claude-fable-5")
+        self.assertEqual(body["system"], FABLE.ADVISOR_SYSTEM_PROMPT)
+        self.assertEqual(body["messages"], [{"role": "user", "content": "Review this plan."}])
+
+    def test_python_api_advisor_fails_closed_without_config_or_exact_model_echo(self) -> None:
+        self.write_state(schema=4, advisor=self.api_route())
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(FABLE.subprocess, "run") as run,
+            self.assertRaisesRegex(FABLE.AdvisorError, "configuration is missing"),
+        ):
+            FABLE.review_plan("Review this plan.")
+        run.assert_not_called()
+
+        self.write_api_config()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def getcode() -> int:
+                return 200
+
+            @staticmethod
+            def read(_size: int = -1) -> bytes:
+                return json.dumps(
+                    {
+                        "model": "some-other-model",
+                        "stop_reason": "end_turn",
+                        "content": [{"type": "text", "text": "PLAN_APPROVED"}],
+                    }
+                ).encode("utf-8")
+
+        opener = mock.Mock()
+        opener.open.return_value = Response()
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(FABLE.urllib_request, "build_opener", return_value=opener),
+            self.assertRaisesRegex(FABLE.AdvisorError, "Strict model verification failed"),
+        ):
+            FABLE.review_plan("Review this plan.")
+        self.assertEqual(opener.open.call_count, 1)
+
+    def test_python_api_status_is_non_secret_and_makes_no_model_call(self) -> None:
+        self.write_state(schema=4, advisor=self.api_route())
+        self.write_api_config(api_key="never-render-this-secret")
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(FABLE.urllib_request, "build_opener") as opener,
+            mock.patch.object(FABLE.subprocess, "run") as run,
+        ):
+            result = FABLE.status()
+        opener.assert_not_called()
+        run.assert_not_called()
+        rendered = json.dumps(result)
+        self.assertNotIn("never-render-this-secret", rendered)
+        self.assertEqual(result["advisor_path"], "python-api")
+        self.assertEqual(result["request_model"], "anthropic/claude-fable-5")
+        self.assertFalse(result["model_call"])
+
+    def test_python_api_transport_errors_are_single_attempt_and_never_fallback(self) -> None:
+        self.write_state(schema=4, advisor=self.api_route())
+        self.write_api_config()
+        scenarios = (
+            (
+                FABLE.urllib_error.HTTPError(
+                    "https://openrouter.ai/api/v1/messages",
+                    302,
+                    "redirect",
+                    {},
+                    io.BytesIO(b'{"error":{"message":"redirect-secret"}}'),
+                ),
+                "HTTP status 302",
+                "redirect-secret",
+            ),
+            (
+                FABLE.urllib_error.HTTPError(
+                    "https://openrouter.ai/api/v1/messages",
+                    429,
+                    "rate limited",
+                    {"Retry-After": "12"},
+                    io.BytesIO(
+                        b'{"error":{"type":"rate_limit_error",'
+                        b'"message":"provider-secret"}}'
+                    ),
+                ),
+                "provider_error_type=rate_limit_error",
+                "provider-secret",
+            ),
+            (
+                FABLE.urllib_error.URLError("network-secret"),
+                "network or timeout",
+                "network-secret",
+            ),
+        )
+        for error, expected, withheld in scenarios:
+            with self.subTest(expected=expected):
+                opener = mock.Mock()
+                opener.open.side_effect = error
+                with (
+                    mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+                    mock.patch.object(
+                        FABLE.urllib_request, "build_opener", return_value=opener
+                    ),
+                    mock.patch.object(FABLE.subprocess, "run") as run,
+                    self.assertRaises(FABLE.AdvisorError) as raised,
+                ):
+                    FABLE.review_plan("Review this plan.")
+                self.assertIn(expected, str(raised.exception))
+                self.assertNotIn(withheld, str(raised.exception))
+                self.assertEqual(opener.open.call_count, 1)
+                run.assert_not_called()
+
+    def test_python_api_refusal_withholds_provider_explanation(self) -> None:
+        self.write_state(schema=4, advisor=self.api_route())
+        self.write_api_config()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def getcode() -> int:
+                return 200
+
+            @staticmethod
+            def read(_size: int = -1) -> bytes:
+                return json.dumps(
+                    {
+                        "model": "anthropic/claude-fable-5",
+                        "stop_reason": "refusal",
+                        "stop_details": {
+                            "type": "policy",
+                            "category": "safety",
+                            "explanation": "withheld-provider-explanation",
+                        },
+                        "content": [],
+                    }
+                ).encode("utf-8")
+
+        opener = mock.Mock()
+        opener.open.return_value = Response()
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(FABLE.urllib_request, "build_opener", return_value=opener),
+            self.assertRaises(FABLE.AdvisorError) as raised,
+        ):
+            FABLE.review_plan("Review this plan.")
+        message = str(raised.exception)
+        self.assertIn("refusal_type='policy'", message)
+        self.assertIn("category='safety'", message)
+        self.assertNotIn("withheld-provider-explanation", message)
+        self.assertEqual(opener.open.call_count, 1)
 
 
 if __name__ == "__main__":

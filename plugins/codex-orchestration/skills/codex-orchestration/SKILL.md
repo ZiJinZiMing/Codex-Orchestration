@@ -121,6 +121,12 @@ If an old prompt contains `orchestrator:`, explain that the current task model a
 
 Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
+The explicit label `advisor: Claude Fable 5 Python API` selects only the bundled
+config-file API Advisor route. Map it to `--advisor-fable-api --advisor-effort
+<normalized-effort>`. Never infer this route from a generic Fable label, an API
+key, environment variables, Claude settings, CC Switch, or the configured URL.
+Python API is not valid for Planner, Designer, Executor, or arbitrary roles.
+
 Persistent Designer accepts only a direct same-provider model, not a Fable MCP
 or unqualified custom-agent route. Route it with `--designer-model` plus
 `--designer-effort`. A Designer route may share a model with another seat; only
@@ -435,6 +441,28 @@ For personal v0.4 custom roles, preview and apply removal with `configure_orches
 
 Use this built-in route when the user names Claude Fable 5. Do not create a custom provider or custom-agent file for it.
 
+There are two explicit Advisor transports. The default `--advisor-fable` transport
+uses the sealed Claude Code subscription adapter described below. The distinct
+`--advisor-fable-api` transport reads only
+`~/.codex/.codex-orchestration-fable-api.json`, which is created with
+`scripts/configure_fable_api.py`. It accepts a full Anthropic Messages URL, an
+exact provider model mapping, and bearer or `x-api-key` authentication. Secrets
+must come from the hidden prompt or `--credential-stdin`, never argv, chat,
+environment variables, Claude settings, or CC Switch. Missing, disabled, unsafe,
+malformed, redirected, timed-out, or model-mismatched API configuration fails
+closed and never falls back to the subscription adapter. The API route is
+Advisor-only; Planner and Designer retain their existing designs.
+
+Python API setup and status validate configuration without making a model call.
+`review_plan` makes one request with no retry, tools, permission prompts, or
+session persistence; requires the provider response to echo the exact configured
+model and finish with `end_turn`; and accepts only a non-empty first-line
+`PLAN_APPROVED` or `PLAN_REVISE`. The provider's configured model ID is a mapping
+chosen by the operator; the exact echo proves that mapping was honored, not the
+provider's hidden implementation. Report the canonical role model as
+`Claude Fable 5`, plus `request_model` and `response_model`. Retain configured
+effort in state but report it as not applied by the Python API transport.
+
 In user-facing diagnostic status or operation results, use the exact name `Claude Fable 5`.
 The concise activation confirmation preserves the supplied `Fable 5` label when that is what the user wrote, as shown in its exact example.
 Report authentication as `first-party login ready`; do not expose or restate Claude account-plan metadata.
@@ -656,6 +684,7 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 
 - `scripts/configure_native_routing.py`: one-time native setup, status, seat changes, and disable.
 - `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 planning and review bridge.
+- `scripts/configure_fable_api.py`: secret-safe dedicated Python API Advisor configuration.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
 - `scripts/external_configurator.py`: preview-first External Model provider, Gate 0, role, status, recovery, and removal lifecycle.

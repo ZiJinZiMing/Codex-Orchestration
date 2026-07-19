@@ -96,6 +96,34 @@ Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHig
 
 Fable 5 uses the official Claude Code CLI and a compatible first-party Claude login. You do not need to add an Anthropic API key to Codex.
 
+### Optional Python API Advisor
+
+Fable may instead be used as Advisor through one explicit Python API route. This
+does not change Planner, Designer, Executor, the root model, or the existing
+Claude Code subscription route. Configure the dedicated file first:
+
+```bash
+python3 <skill-dir>/scripts/configure_fable_api.py --codex-home ~/.codex
+```
+
+The configurator accepts a full Anthropic Messages endpoint URL, the provider's
+exact model ID (for example `anthropic/claude-fable-5`), and either bearer or
+`x-api-key` authentication. It reads the credential from a hidden prompt, or from
+standard input with `--credential-stdin`; a credential is never accepted as a
+command argument. Then request the route naturally:
+
+```text
+/codex-orchestration setup advisor: Claude Fable 5 Python API, executor: GPT-5.6 Luna Extra High
+```
+
+The underlying native flag is `--advisor-fable-api`. Setup and status validate
+the dedicated `.codex-orchestration-fable-api.json` file without making a model
+call. Review sends one request, accepts no redirect or retry, requires the exact
+configured model echo and an `end_turn` result, and exposes only
+`PLAN_APPROVED`/`PLAN_REVISE` review text. There is no CC Switch, environment,
+Claude-settings, or subscription fallback. The configured effort is retained as
+workflow metadata but is not sent by this API path.
+
 ## Choose your roles
 
 ```text
@@ -273,7 +301,8 @@ codex plugin add codex-orchestration@codex-orchestration
 Version **0.6.0 or newer** is required for External Model roles; version **0.7.0
 or newer** adds `--update`, routing repair, and Designer; version **0.7.1 or newer**
 lets the natural `Designer: Kimi K3` label enter the External Model lifecycle;
-version **0.7.2 or newer** uses the concise per-role activation confirmation.
+version **0.7.2 or newer** uses the concise per-role activation confirmation;
+version **0.8.0 or newer** adds the config-file-only Python API Fable Advisor.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 

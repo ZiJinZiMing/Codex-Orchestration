@@ -25,6 +25,9 @@ import time
 from typing import Any
 
 from routing_state import (
+    FABLE_API_PATH,
+    FABLE_API_SOURCE,
+    FABLE_API_TRANSPORT,
     FABLE_EFFORTS,
     FABLE_MODEL,
     MANAGED_MARKER,
@@ -131,6 +134,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the bundled Claude Fable 5 advisor through Claude Code.",
     )
+    advisor.add_argument(
+        "--advisor-fable-api",
+        action="store_true",
+        help="Use the bundled Claude Fable 5 advisor through the configured Python API.",
+    )
     parser.add_argument(
         "--advisor-effort",
         default="auto",
@@ -190,6 +198,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.advisor_fable_api,
             args.designer_model,
             args.executor_effort != "auto",
             args.planner_effort != "auto",
@@ -231,9 +240,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if args.planner_fable:
         normalize_fable_effort(args.planner_effort)
-    if args.advisor_fable:
+    if args.advisor_fable or args.advisor_fable_api:
         normalize_fable_effort(args.advisor_effort)
-    if args.planner_fable and args.advisor_fable:
+    if args.planner_fable and (args.advisor_fable or args.advisor_fable_api):
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct; both cannot use Claude Fable 5."
         )
@@ -405,7 +414,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.7.2",
+                        "version": "0.8.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -844,11 +853,23 @@ def select_fable_server() -> str:
     )
 
 
-def verify_fable_prerequisites(effort: str) -> dict[str, str]:
+def verify_fable_prerequisites(
+    effort: str, *, python_api: bool = False, codex_home: Path | None = None
+) -> dict[str, str]:
     try:
-        from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
+        from fable_advisor_mcp import (
+            AdvisorError,
+            check_claude_auth,
+            check_python_api_config,
+            resolve_claude,
+        )
     except ImportError as exc:  # pragma: no cover - corrupt package
         raise ConfigurationError("The bundled Claude Fable 5 bridge is missing.") from exc
+    if python_api:
+        try:
+            return check_python_api_config(codex_home)
+        except AdvisorError as exc:
+            raise ConfigurationError(str(exc)) from exc
     try:
         claude = resolve_claude()
         auth = check_claude_auth(claude)
@@ -903,6 +924,11 @@ def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
+        if route.get("transport") == FABLE_API_TRANSPORT:
+            return (
+                "Claude Fable 5 through Python API "
+                f"(configured effort {route['effort']}; not applied by the API path)"
+            )
         return f"Claude Fable 5 {route['effort']}"
     return f"{route['model']}@{route['effort']}"
 
@@ -1307,14 +1333,25 @@ def _status(
             ]
             for route in fable_routes:
                 try:
-                    verify_fable_prerequisites(route["effort"])
+                    python_api = route.get("transport") == FABLE_API_TRANSPORT
+                    details = verify_fable_prerequisites(
+                        route["effort"],
+                        python_api=python_api,
+                        codex_home=app.codex_home,
+                    )
                 except ConfigurationError as exc:
                     fable_available = False
                     print(f"Claude Fable 5: unavailable — {exc}")
                 else:
-                    print(
-                        "Claude Fable 5: ready — first-party login; no model call made"
-                    )
+                    if python_api:
+                        print(
+                            "Claude Fable 5 Python API: ready — config file; "
+                            f"provider model {details['request_model']}; no model call made"
+                        )
+                    else:
+                        print(
+                            "Claude Fable 5: ready — first-party login; no model call made"
+                        )
             try:
                 verified = verify_agent_routes(
                     app.codex_home,
@@ -2016,7 +2053,7 @@ def main() -> int:
             fable_auth: dict[str, str] | None = None
             fable_server = (
                 select_fable_server()
-                if args.planner_fable or args.advisor_fable
+                if args.planner_fable or args.advisor_fable or args.advisor_fable_api
                 else None
             )
             if args.planner_model:
@@ -2064,6 +2101,16 @@ def main() -> int:
                     "effort": normalize_fable_effort(args.advisor_effort),
                     "server": fable_server,
                 }
+            elif args.advisor_fable_api:
+                advisor = {
+                    "kind": "fable",
+                    "model": FABLE_MODEL,
+                    "effort": normalize_fable_effort(args.advisor_effort),
+                    "server": fable_server,
+                    "transport": FABLE_API_TRANSPORT,
+                    "api_source": FABLE_API_SOURCE,
+                    "path": FABLE_API_PATH,
+                }
 
             if args.designer_model:
                 designer_effort = resolve_model_effort(
@@ -2079,13 +2126,14 @@ def main() -> int:
                     "effort": designer_effort,
                 }
             validate_planning_routes(planner, advisor)
-            fable_efforts = {
-                route["effort"]
-                for route in (planner, advisor)
-                if isinstance(route, dict) and route.get("kind") == "fable"
-            }
-            for effort in sorted(fable_efforts):
-                fable_auth = verify_fable_prerequisites(effort)
+            for route in (planner, advisor):
+                if not isinstance(route, dict) or route.get("kind") != "fable":
+                    continue
+                fable_auth = verify_fable_prerequisites(
+                    route["effort"],
+                    python_api=route.get("transport") == FABLE_API_TRANSPORT,
+                    codex_home=app.codex_home,
+                )
 
             verified_agents = verify_agent_routes(
                 app.codex_home,
@@ -2124,10 +2172,17 @@ def main() -> int:
                     f"{advisor['effort']} (Claude Code effective value)"
                 )
             if fable_auth is not None:
-                print(
-                    "Claude Fable 5 login: ready — first-party; "
-                    "setup makes no model call"
-                )
+                if args.advisor_fable_api:
+                    print(
+                        "Claude Fable 5 Python API: ready — config file; "
+                        f"provider model {fable_auth['request_model']}; "
+                        "setup makes no model call"
+                    )
+                else:
+                    print(
+                        "Claude Fable 5 login: ready — first-party; "
+                        "setup makes no model call"
+                    )
             if verified_agents:
                 print(
                     "Custom-agent files: "

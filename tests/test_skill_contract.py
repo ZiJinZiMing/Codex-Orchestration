@@ -284,6 +284,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("Omission or `Auto` means `High`", SKILL)
         self.assertIn("`Ultra` is a user-facing alias", SKILL)
         self.assertIn("--advisor-fable --advisor-effort <normalized-effort>", SKILL)
+        self.assertIn("--advisor-fable-api --advisor-effort", SKILL)
         self.assertIn("--planner-fable --planner-effort <normalized-effort>", SKILL)
         self.assertIn("built-in cross-provider Planner or Advisor exception", SKILL)
         self.assertIn("All bundled variants are disabled by default", SKILL)
@@ -299,6 +300,8 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("do not expose or restate Claude account-plan metadata", SKILL)
         self.assertIn("MCP requests do not carry caller identity", SKILL)
         self.assertIn("Never describe the caller boundary as engine-enforced", SKILL)
+        self.assertIn("no retry, tools, permission prompts, or", SKILL)
+        self.assertIn("never falls back to the subscription adapter", SKILL)
 
     def test_direct_routes_are_guarded_to_the_root_provider(self) -> None:
         self.assertIn("Direct model overrides keep the root's provider", SKILL)

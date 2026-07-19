@@ -36,6 +36,15 @@ def fable_route(server: str = "fable-advisor-python3") -> dict[str, str]:
     }
 
 
+def fable_api_route() -> dict[str, str]:
+    return {
+        **fable_route(),
+        "transport": STATE.FABLE_API_TRANSPORT,
+        "api_source": STATE.FABLE_API_SOURCE,
+        "path": STATE.FABLE_API_PATH,
+    }
+
+
 def genuine_state(schema: int) -> dict[str, object]:
     managed: dict[str, object] = {
         "mode": f"{STATE.MANAGED_MARKER}\nmode body",
@@ -104,6 +113,32 @@ class RoutingStateTests(unittest.TestCase):
             "usage_hint_text": managed["usage"],
         }
         self.assertIs(STATE.validate_routing_state(state), state)
+
+    def test_schema_four_accepts_only_the_exact_python_api_advisor_route(self) -> None:
+        state = genuine_state(4)
+        state["planner"] = {"kind": "model", "model": "gpt-planner", "effort": "high"}
+        state["advisor"] = fable_api_route()
+        self.assertIs(STATE.validate_routing_state(state), state)
+
+        mutations = (
+            lambda route: route.update(transport="claude-code"),
+            lambda route: route.update(api_source="environment"),
+            lambda route: route.update(path="ccswitch"),
+            lambda route: route.pop("path"),
+            lambda route: route.update(future=True),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                invalid = deepcopy(state)
+                mutate(invalid["advisor"])
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(invalid)
+
+        planner_api = deepcopy(state)
+        planner_api["planner"] = fable_api_route()
+        planner_api["advisor"] = {"kind": "agent", "agent": "independent_advisor"}
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(planner_api)
 
     def test_full_negative_invariant_matrix_fails_closed(self) -> None:
         baseline = genuine_state(4)
