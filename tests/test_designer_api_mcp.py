@@ -217,6 +217,139 @@ class DesignerApiMcpTests(unittest.TestCase):
                 opener.open.assert_called_once()
                 self.assertNotIn("secret-token", str(caught.exception))
 
+    def test_http_diagnostics_validate_type_and_redact_payload(self) -> None:
+        def diagnostics(payload: object, *, raw: bool = False) -> str:
+            body = payload if raw else json.dumps(payload).encode("utf-8")
+            error = urllib_error.HTTPError(
+                "https://provider.invalid/messages?url-sentinel",
+                429,
+                "debug-sentinel",
+                {"Retry-After": "12", "X-Auth": "auth-sentinel"},
+                io.BytesIO(body),
+            )
+            try:
+                return MCP._safe_http_error_diagnostics(error)
+            finally:
+                error.close()
+
+        self.assertEqual(
+            diagnostics({"error": {"error_type": "Nested.Type-1", "type": "legacy"}}),
+            "; retry_after_seconds=12; provider_error_type=Nested.Type-1",
+        )
+        self.assertEqual(
+            diagnostics({"error": {"type": "legacy_type"}}),
+            "; retry_after_seconds=12; provider_error_type=legacy_type",
+        )
+        self.assertEqual(
+            diagnostics({"error": {"error_type": "nested", "type": "legacy"}}),
+            "; retry_after_seconds=12; provider_error_type=nested",
+        )
+
+        invalid_values = (
+            7,
+            ["list"],
+            {"dict": True},
+            None,
+            "",
+            "x" * 65,
+            "类型",
+            "has space",
+            "control\x00value",
+            "slash/value",
+            "mixed:value?",
+            "trailing\n",
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=repr(invalid)):
+                self.assertEqual(
+                    diagnostics({"error": {"error_type": invalid, "type": "legacy"}}),
+                    "; retry_after_seconds=12",
+                )
+                self.assertEqual(
+                    diagnostics({"error": {"type": invalid}}),
+                    "; retry_after_seconds=12",
+                )
+
+        for direct in ("Bearer credential-secret", "prompt fragment: secret"):
+            with self.subTest(direct=direct):
+                rendered = diagnostics(
+                    {"error": {"error_type": direct, "type": "legacy_type"}}
+                )
+                self.assertEqual(rendered, "; retry_after_seconds=12")
+                self.assertNotIn(direct, rendered)
+
+        for payload in (b"{not-json", b"[1, 2]", b'"string"', b'{"data": "missing-error"}'):
+            with self.subTest(payload=payload):
+                self.assertEqual(diagnostics(payload, raw=True), "; retry_after_seconds=12")
+
+        payload = {
+            "error": {
+                "error_type": "rate_limit_error",
+                "message": "provider-message-sentinel",
+                "body": "provider-body-sentinel",
+                "debug": "provider-debug-sentinel",
+                "url": "provider-url-sentinel",
+                "auth": "provider-auth-sentinel",
+                "api_key": "direct-credential-sentinel",
+                "prompt": "direct-prompt-sentinel",
+            }
+        }
+        rendered = diagnostics(payload)
+        self.assertEqual(
+            rendered,
+            "; retry_after_seconds=12; provider_error_type=rate_limit_error",
+        )
+        for sentinel in (
+            "provider-message-sentinel",
+            "provider-body-sentinel",
+            "provider-debug-sentinel",
+            "provider-url-sentinel",
+            "provider-auth-sentinel",
+            "direct-credential-sentinel",
+            "direct-prompt-sentinel",
+            "debug-sentinel",
+            "url-sentinel",
+            "auth-sentinel",
+        ):
+            self.assertNotIn(sentinel, rendered)
+
+    def test_http_error_prefix_retry_and_subtype_suffix_are_pinned(self) -> None:
+        failure = urllib_error.HTTPError(
+            "https://api.kimi.com/coding/v1/messages",
+            429,
+            "provider-message-sentinel secret-token",
+            {"Retry-After": "12"},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "error": {
+                            "error_type": "rate_limit_error",
+                            "type": "legacy_type",
+                            "message": "provider-body-sentinel",
+                        }
+                    }
+                ).encode("utf-8")
+            ),
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = failure
+        with mock.patch.object(MCP.urllib_request, "build_opener", return_value=opener):
+            with self.assertRaises(MCP.DesignerError) as caught:
+                MCP.create_design("prompt-sentinel")
+        self.assertEqual(
+            str(caught.exception),
+            "Designer API request failed with HTTP status 429.; "
+            "retry_after_seconds=12; provider_error_type=rate_limit_error",
+        )
+        for sentinel in (
+            "secret-token",
+            "provider-message-sentinel",
+            "provider-body-sentinel",
+            "prompt-sentinel",
+        ):
+            self.assertNotIn(sentinel, str(caught.exception))
+        opener.open.assert_called_once()
+
     def test_tool_surface_is_exact(self) -> None:
         tools = MCP.tool_definitions()
         self.assertEqual([tool["name"] for tool in tools], ["create_design", "status"])

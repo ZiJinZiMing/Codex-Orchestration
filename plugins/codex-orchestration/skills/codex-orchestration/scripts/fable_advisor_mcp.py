@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import shutil
 import subprocess
@@ -41,6 +42,7 @@ AUTH_TIMEOUT_SECONDS = 20
 DIRECT_API_TIMEOUT_SECONDS = 600
 DIRECT_API_MAX_TOKENS = 65536
 DIRECT_API_MAX_RESPONSE_BYTES = 2_000_000
+PYTHON_API_PACKET_TRANSLATION = str.maketrans({"\u201c": '"', "\u201d": '"'})
 ANTHROPIC_VERSION = "2023-06-01"
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # Applies to the combined user-controlled text sent by one model operation.
@@ -101,9 +103,9 @@ def _safe_refusal_field(value: Any, max_chars: int = 512) -> str | None:
 
 
 def _safe_http_error_type(value: Any) -> str | None:
-    if not isinstance(value, str) or not value or len(value) > 96:
+    if not isinstance(value, str):
         return None
-    if not all(char.isascii() and (char.isalnum() or char in "._-") for char in value):
+    if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value) is None:
         return None
     return value
 
@@ -125,9 +127,15 @@ def _safe_http_error_diagnostics(exc: urllib_error.HTTPError) -> str:
         payload = None
     if isinstance(payload, dict):
         error = payload.get("error")
-        error_type = _safe_http_error_type(
-            error.get("type") if isinstance(error, dict) else None
-        )
+        if isinstance(error, dict):
+            candidate = (
+                error["error_type"]
+                if "error_type" in error
+                else error.get("type")
+            )
+            error_type = _safe_http_error_type(candidate)
+        else:
+            error_type = None
         if error_type is not None:
             details.append(f"provider_error_type={error_type}")
     return "; " + "; ".join(details) if details else ""
@@ -526,7 +534,12 @@ def _review_plan_python_api(packet: str, route: dict[str, str]) -> dict[str, Any
         "model": request_model,
         "max_tokens": DIRECT_API_MAX_TOKENS,
         "system": ADVISOR_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": packet}],
+        "messages": [
+            {
+                "role": "user",
+                "content": packet.translate(PYTHON_API_PACKET_TRANSLATION),
+            }
+        ],
     }
     request = urllib_request.Request(
         endpoint,

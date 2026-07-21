@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 from typing import Any
@@ -69,6 +70,14 @@ def _safe_field(value: Any, limit: int = 96) -> str | None:
     return value
 
 
+def _safe_http_error_type(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value) is None:
+        return None
+    return value
+
+
 def _safe_http_error_diagnostics(exc: urllib_error.HTTPError) -> str:
     details: list[str] = []
     retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
@@ -80,7 +89,15 @@ def _safe_http_error_diagnostics(exc: urllib_error.HTTPError) -> str:
         payload = None
     if isinstance(payload, dict):
         error = payload.get("error")
-        error_type = _safe_field(error.get("type") if isinstance(error, dict) else None)
+        if isinstance(error, dict):
+            candidate = (
+                error["error_type"]
+                if "error_type" in error
+                else error.get("type")
+            )
+            error_type = _safe_http_error_type(candidate)
+        else:
+            error_type = None
         if error_type is not None:
             details.append(f"provider_error_type={error_type}")
     return "; " + "; ".join(details) if details else ""
@@ -190,7 +207,7 @@ def create_design(packet: str) -> dict[str, Any]:
         headers={
             "content-type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
-            "user-agent": "codex-orchestration-designer-api/0.9.0",
+            "user-agent": "codex-orchestration-designer-api/0.9.1",
             **credential,
         },
         method="POST",

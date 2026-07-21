@@ -777,7 +777,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             mock.patch.object(FABLE.urllib_request, "build_opener", return_value=Opener()),
             mock.patch.object(FABLE.subprocess, "run") as run,
         ):
-            result = FABLE.review_plan("Review this plan.")
+            result = FABLE.review_plan('Review \u201cquoted\u201d \u4e2d\u6587 plan.')
 
         run.assert_not_called()
         self.assertEqual(result["decision"], "PLAN_APPROVED")
@@ -791,7 +791,10 @@ class FableAdvisorMcpTests(unittest.TestCase):
         body = json.loads(request.data)
         self.assertEqual(body["model"], "anthropic/claude-fable-5")
         self.assertEqual(body["system"], FABLE.ADVISOR_SYSTEM_PROMPT)
-        self.assertEqual(body["messages"], [{"role": "user", "content": "Review this plan."}])
+        self.assertEqual(
+            body["messages"],
+            [{"role": "user", "content": 'Review "quoted" \u4e2d\u6587 plan.'}],
+        )
 
     def test_python_api_advisor_fails_closed_without_config_or_exact_model_echo(self) -> None:
         self.write_state(schema=4, advisor=self.api_route())
@@ -865,7 +868,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     {},
                     io.BytesIO(b'{"error":{"message":"redirect-secret"}}'),
                 ),
-                "HTTP status 302",
+                "Python API request failed with HTTP status 302.",
                 "redirect-secret",
             ),
             (
@@ -879,7 +882,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                         b'"message":"provider-secret"}}'
                     ),
                 ),
-                "provider_error_type=rate_limit_error",
+                "Python API request failed with HTTP status 429.; retry_after_seconds=12; provider_error_type=rate_limit_error",
                 "provider-secret",
             ),
             (
@@ -901,10 +904,109 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     self.assertRaises(FABLE.AdvisorError) as raised,
                 ):
                     FABLE.review_plan("Review this plan.")
-                self.assertIn(expected, str(raised.exception))
+                if isinstance(error, FABLE.urllib_error.HTTPError):
+                    self.assertEqual(expected, str(raised.exception))
+                else:
+                    self.assertIn(expected, str(raised.exception))
                 self.assertNotIn(withheld, str(raised.exception))
                 self.assertEqual(opener.open.call_count, 1)
                 run.assert_not_called()
+
+    def test_python_api_http_diagnostics_validate_type_and_redact_payload(self) -> None:
+        def diagnostics(payload: object, *, raw: bool = False) -> str:
+            body = payload if raw else json.dumps(payload).encode("utf-8")
+            error = FABLE.urllib_error.HTTPError(
+                "https://provider.invalid/messages?url-sentinel",
+                429,
+                "debug-sentinel",
+                {"Retry-After": "12", "X-Auth": "auth-sentinel"},
+                io.BytesIO(body),
+            )
+            try:
+                return FABLE._safe_http_error_diagnostics(error)
+            finally:
+                error.close()
+
+        self.assertEqual(
+            diagnostics({"error": {"error_type": "Nested.Type-1", "type": "legacy"}}),
+            "; retry_after_seconds=12; provider_error_type=Nested.Type-1",
+        )
+        self.assertEqual(
+            diagnostics({"error": {"type": "legacy_type"}}),
+            "; retry_after_seconds=12; provider_error_type=legacy_type",
+        )
+        self.assertEqual(
+            diagnostics({"error": {"error_type": "nested", "type": "legacy"}}),
+            "; retry_after_seconds=12; provider_error_type=nested",
+        )
+
+        invalid_values = (
+            7,
+            ["list"],
+            {"dict": True},
+            None,
+            "",
+            "x" * 65,
+            "类型",
+            "has space",
+            "control\x00value",
+            "slash/value",
+            "mixed:value?",
+            "trailing\n",
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=repr(invalid)):
+                self.assertEqual(
+                    diagnostics({"error": {"error_type": invalid, "type": "legacy"}}),
+                    "; retry_after_seconds=12",
+                )
+                self.assertEqual(
+                    diagnostics({"error": {"type": invalid}}),
+                    "; retry_after_seconds=12",
+                )
+
+        for direct in ("Bearer credential-secret", "prompt fragment: secret"):
+            with self.subTest(direct=direct):
+                rendered = diagnostics(
+                    {"error": {"error_type": direct, "type": "legacy_type"}}
+                )
+                self.assertEqual(rendered, "; retry_after_seconds=12")
+                self.assertNotIn(direct, rendered)
+
+        for payload in (b"{not-json", b"[1, 2]", b'"string"', b'{"data": "missing-error"}'):
+            with self.subTest(payload=payload):
+                self.assertEqual(diagnostics(payload, raw=True), "; retry_after_seconds=12")
+
+        payload = {
+            "error": {
+                "error_type": "rate_limit_error",
+                "message": "provider-message-sentinel",
+                "body": "provider-body-sentinel",
+                "debug": "provider-debug-sentinel",
+                "url": "provider-url-sentinel",
+                "auth": "provider-auth-sentinel",
+                "api_key": "direct-credential-sentinel",
+                "prompt": "direct-prompt-sentinel",
+            }
+        }
+        rendered = diagnostics(payload)
+        self.assertEqual(
+            rendered,
+            "; retry_after_seconds=12; provider_error_type=rate_limit_error",
+        )
+        for sentinel in (
+            "provider-message-sentinel",
+            "provider-body-sentinel",
+            "provider-debug-sentinel",
+            "provider-url-sentinel",
+            "provider-auth-sentinel",
+            "direct-credential-sentinel",
+            "direct-prompt-sentinel",
+            "debug-sentinel",
+            "url-sentinel",
+            "auth-sentinel",
+        ):
+            self.assertNotIn(sentinel, rendered)
 
     def test_python_api_refusal_withholds_provider_explanation(self) -> None:
         self.write_state(schema=4, advisor=self.api_route())
