@@ -1,12 +1,14 @@
 # Changelog
 
-## 0.9.1 — Unreleased
+## 0.9.2 — Unreleased
 
 - Surface a strictly allowlisted provider error subtype for Python API Advisor
   and Designer failures without exposing provider messages, prompts, credentials,
   URLs, or raw response bodies.
-- Normalize only typographic double quotation marks in Python API Advisor packets,
-  preserving all other Unicode text while avoiding a reproducible provider HTTP 400.
+- Launch every bundled Python Advisor and Designer MCP with UTF-8 standard streams,
+  and enforce the same encoding at bridge startup. Python API Advisor packets now
+  preserve original Unicode text, including typographic quotation marks, instead of
+  rewriting user-authored plan content.
 
 - Add an explicit, config-file-only Python API transport for Designer. The
   root-directed bridge sends one Anthropic Messages request to the exact configured

@@ -42,7 +42,6 @@ AUTH_TIMEOUT_SECONDS = 20
 DIRECT_API_TIMEOUT_SECONDS = 600
 DIRECT_API_MAX_TOKENS = 65536
 DIRECT_API_MAX_RESPONSE_BYTES = 2_000_000
-PYTHON_API_PACKET_TRANSLATION = str.maketrans({"\u201c": '"', "\u201d": '"'})
 ANTHROPIC_VERSION = "2023-06-01"
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # Applies to the combined user-controlled text sent by one model operation.
@@ -537,7 +536,7 @@ def _review_plan_python_api(packet: str, route: dict[str, str]) -> dict[str, Any
         "messages": [
             {
                 "role": "user",
-                "content": packet.translate(PYTHON_API_PACKET_TRANSLATION),
+                "content": packet,
             }
         ],
     }
@@ -836,7 +835,15 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 def main() -> int:
+    _configure_utf8_stdio()
     for line in sys.stdin:
         try:
             request = json.loads(line)

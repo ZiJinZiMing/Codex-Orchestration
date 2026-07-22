@@ -207,7 +207,7 @@ def create_design(packet: str) -> dict[str, Any]:
         headers={
             "content-type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
-            "user-agent": "codex-orchestration-designer-api/0.9.1",
+            "user-agent": "codex-orchestration-designer-api/0.9.2",
             **credential,
         },
         method="POST",
@@ -382,7 +382,15 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 def main() -> int:
+    _configure_utf8_stdio()
     for line in sys.stdin:
         try:
             request = json.loads(line)

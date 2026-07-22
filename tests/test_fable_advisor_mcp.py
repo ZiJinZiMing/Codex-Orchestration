@@ -793,8 +793,38 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.assertEqual(body["system"], FABLE.ADVISOR_SYSTEM_PROMPT)
         self.assertEqual(
             body["messages"],
-            [{"role": "user", "content": 'Review "quoted" \u4e2d\u6587 plan.'}],
+            [{"role": "user", "content": 'Review \u201cquoted\u201d \u4e2d\u6587 plan.'}],
         )
+
+    def test_mcp_stdio_is_explicitly_utf8(self) -> None:
+        stdin = mock.Mock()
+        stdout = mock.Mock()
+        with (
+            mock.patch.object(FABLE.sys, "stdin", stdin),
+            mock.patch.object(FABLE.sys, "stdout", stdout),
+        ):
+            FABLE._configure_utf8_stdio()
+        stdin.reconfigure.assert_called_once_with(encoding="utf-8", errors="strict")
+        stdout.reconfigure.assert_called_once_with(encoding="utf-8", errors="strict")
+
+    def test_mcp_process_preserves_utf8_jsonrpc_when_utf8_mode_is_disabled(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONUTF8"] = "0"
+        request = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "\u201cprobe\u201d"},
+            ensure_ascii=False,
+        ).encode("utf-8") + b"\n"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            input=request,
+            capture_output=True,
+            env=environment,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        response = json.loads(result.stdout.decode("utf-8"))
+        self.assertEqual(response["error"]["message"], "Method not found: \u201cprobe\u201d")
 
     def test_python_api_advisor_fails_closed_without_config_or_exact_model_echo(self) -> None:
         self.write_state(schema=4, advisor=self.api_route())

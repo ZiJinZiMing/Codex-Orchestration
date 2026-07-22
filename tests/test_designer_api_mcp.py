@@ -359,6 +359,17 @@ class DesignerApiMcpTests(unittest.TestCase):
         )
         self.assertTrue(response["result"]["isError"])
 
+    def test_mcp_stdio_is_explicitly_utf8(self) -> None:
+        stdin = mock.Mock()
+        stdout = mock.Mock()
+        with (
+            mock.patch.object(MCP.sys, "stdin", stdin),
+            mock.patch.object(MCP.sys, "stdout", stdout),
+        ):
+            MCP._configure_utf8_stdio()
+        stdin.reconfigure.assert_called_once_with(encoding="utf-8", errors="strict")
+        stdout.reconfigure.assert_called_once_with(encoding="utf-8", errors="strict")
+
 
 if __name__ == "__main__":
     unittest.main()
